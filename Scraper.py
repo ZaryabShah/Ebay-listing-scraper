@@ -58,8 +58,10 @@ from webdriver_manager.chrome import ChromeDriverManager
 ###############################################################################
 KEYWORDS: List[str] = [
     "Playstation 5",
-    "Grafikkarte",
-    "Nintendo Switch",
+    "xbox series x",
+    "xbox series s",
+    "nintendo switch",
+    "steam deck",
 ]
 
 MAX_PAGES: int = 1            # depth per keyword (1 is usually enough)
@@ -68,7 +70,7 @@ STATE_PATH = Path("state.json")
 
 # Telegram -----------------------------------------------------------
 TG_BOT_TOKEN = "7639063889:AAFBQ1zxgiFQZn7FcdrSkSJQ821CXjrjTFU"
-TG_CHAT_ID = "7335015078"
+TG_CHAT_ID = "1341792260"
 if not TG_BOT_TOKEN or not TG_CHAT_ID:
     sys.exit("[FATAL] TG_BOT_TOKEN and TG_CHAT_ID must be set as env vars!")
 
