@@ -22,6 +22,20 @@ import requests
 # Configuration
 STATE_PATH = Path("state.json")
 SCRAPER_SCRIPT = "Scraper.py"
+PID_FILE = Path("scraper.pid")
+LOG_FILE = Path("scraper.log")
+
+# Setup logging
+import logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s [%(levelname)s] %(message)s',
+    handlers=[
+        logging.FileHandler(LOG_FILE),
+        logging.StreamHandler()
+    ]
+)
+logger = logging.getLogger(__name__)
 
 # Page configuration
 st.set_page_config(
@@ -100,41 +114,161 @@ class ScraperManager:
     def __init__(self):
         self.process = None
         self.is_running = False
+        self.pid = None
         
+    def is_process_running(self, pid):
+        """Check if a process is running by PID"""
+        try:
+            if os.name == 'nt':  # Windows
+                import psutil
+                return psutil.pid_exists(pid)
+            else:  # Unix/Linux
+                os.kill(pid, 0)
+                return True
+        except:
+            return False
+    
+    def get_running_scraper_pid(self):
+        """Get the PID of currently running scraper if any"""
+        if PID_FILE.exists():
+            try:
+                with open(PID_FILE, 'r') as f:
+                    pid = int(f.read().strip())
+                if self.is_process_running(pid):
+                    return pid
+                else:
+                    # Clean up stale PID file
+                    PID_FILE.unlink()
+                    return None
+            except:
+                return None
+        return None
+    
     def start_scraper(self):
         """Start the scraper process"""
-        if not self.is_running:
-            try:
-                self.process = subprocess.Popen([
-                    sys.executable, SCRAPER_SCRIPT
-                ], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-                self.is_running = True
-                return True, "Scraper started successfully!"
-            except Exception as e:
-                return False, f"Failed to start scraper: {str(e)}"
-        return False, "Scraper is already running!"
+        # Check if already running
+        existing_pid = self.get_running_scraper_pid()
+        if existing_pid:
+            logger.info(f"Scraper already running with PID {existing_pid}")
+            return False, f"Scraper is already running (PID: {existing_pid})"
+        
+        try:
+            # Start the process
+            self.process = subprocess.Popen([
+                sys.executable, SCRAPER_SCRIPT
+            ], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, 
+            creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if os.name == 'nt' else 0)
+            
+            self.pid = self.process.pid
+            self.is_running = True
+            
+            # Save PID to file
+            with open(PID_FILE, 'w') as f:
+                f.write(str(self.pid))
+            
+            logger.info(f"Scraper started successfully with PID {self.pid}")
+            return True, f"Scraper started successfully! (PID: {self.pid})"
+        except Exception as e:
+            logger.error(f"Failed to start scraper: {str(e)}")
+            return False, f"Failed to start scraper: {str(e)}"
     
     def stop_scraper(self):
         """Stop the scraper process"""
-        if self.is_running and self.process:
-            try:
-                self.process.terminate()
-                self.process.wait(timeout=5)
-                self.is_running = False
-                return True, "Scraper stopped successfully!"
-            except Exception as e:
-                return False, f"Failed to stop scraper: {str(e)}"
-        return False, "Scraper is not running!"
+        existing_pid = self.get_running_scraper_pid()
+        
+        if not existing_pid:
+            return False, "No scraper process found!"
+        
+        try:
+            if os.name == 'nt':  # Windows
+                import psutil
+                process = psutil.Process(existing_pid)
+                process.terminate()
+                process.wait(timeout=10)
+            else:  # Unix/Linux
+                os.kill(existing_pid, 15)  # SIGTERM
+                time.sleep(2)
+                if self.is_process_running(existing_pid):
+                    os.kill(existing_pid, 9)  # SIGKILL
+            
+            # Clean up PID file
+            if PID_FILE.exists():
+                PID_FILE.unlink()
+            
+            self.is_running = False
+            self.process = None
+            self.pid = None
+            
+            logger.info(f"Scraper stopped successfully (PID: {existing_pid})")
+            return True, f"Scraper stopped successfully! (PID: {existing_pid})"
+        except Exception as e:
+            logger.error(f"Failed to stop scraper: {str(e)}")
+            return False, f"Failed to stop scraper: {str(e)}"
     
     def get_status(self):
-        """Get current scraper status"""
-        if self.process and self.is_running:
-            if self.process.poll() is None:
-                return "Running"
-            else:
-                self.is_running = False
-                return "Stopped"
-        return "Stopped"
+        """Get current scraper status - works across sessions"""
+        existing_pid = self.get_running_scraper_pid()
+        if existing_pid:
+            self.is_running = True
+            self.pid = existing_pid
+            return "Running"
+        else:
+            self.is_running = False
+            self.pid = None
+            return "Stopped"
+    
+    def get_process_info(self):
+        """Get detailed process information"""
+        existing_pid = self.get_running_scraper_pid()
+        if existing_pid:
+            try:
+                if os.name == 'nt':  # Windows
+                    import psutil
+                    process = psutil.Process(existing_pid)
+                    return {
+                        'pid': existing_pid,
+                        'status': process.status(),
+                        'cpu_percent': process.cpu_percent(),
+                        'memory_info': process.memory_info(),
+                        'create_time': datetime.fromtimestamp(process.create_time())
+                    }
+                else:
+                    return {'pid': existing_pid, 'status': 'running'}
+            except:
+                pass
+        return None
+
+def get_recent_logs(num_lines=50):
+    """Read recent logs from the log file"""
+    try:
+        if not LOG_FILE.exists():
+            return ["No logs available yet."]
+        
+        with open(LOG_FILE, 'r', encoding='utf-8') as f:
+            lines = f.readlines()
+            return [line.strip() for line in lines[-num_lines:] if line.strip()]
+    except Exception as e:
+        return [f"Error reading logs: {str(e)}"]
+
+def write_log(message, level="INFO"):
+    """Write a log message to both file and console"""
+    timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    log_entry = f"[{timestamp}] {level}: {message}"
+    
+    # Write to file
+    try:
+        with open(LOG_FILE, 'a', encoding='utf-8') as f:
+            f.write(log_entry + '\n')
+    except:
+        pass
+    
+    # Also log using Python logger
+    if level == "ERROR":
+        logger.error(message)
+    elif level == "WARNING":
+        logger.warning(message)
+    else:
+        logger.info(message)
 
 def load_keywords():
     """Load keywords from the scraper file"""
@@ -153,7 +287,10 @@ def load_keywords():
                 if line and not line.startswith('#') and line != '':
                     keywords.append(line)
             return keywords
-        return ["Playstation 5", "Grafikkarte", "Nintendo Switch"]  # Default keywords if parsing fails
+        
+        # Return default keywords if parsing fails
+        default_keywords = ["Playstation 5", "Grafikkarte", "Nintendo Switch"]
+        return default_keywords
     except Exception as e:
         st.error(f"Error loading keywords: {str(e)}")
         return ["Playstation 5", "Grafikkarte", "Nintendo Switch"]  # Default keywords
@@ -268,12 +405,21 @@ def main():
     with st.sidebar:
         st.markdown('<div class="sidebar-section">', unsafe_allow_html=True)
         st.header("🎛️ Control Panel")
-        
-        # Scraper controls
+          # Scraper controls with detailed status
         scraper_status = st.session_state.scraper_manager.get_status()
+        process_info = st.session_state.scraper_manager.get_process_info()
         
         if scraper_status == "Running":
             st.markdown('<p class="status-running">● Status: Running</p>', unsafe_allow_html=True)
+              # Show process details if available
+            if process_info:
+                st.markdown(f"**PID:** {process_info['pid']}")
+                if 'cpu_percent' in process_info:
+                    st.markdown(f"**CPU:** {process_info['cpu_percent']:.1f}%")
+                if 'create_time' in process_info:
+                    runtime = datetime.now() - process_info['create_time']
+                    st.markdown(f"**Runtime:** {str(runtime).split('.')[0]}")
+            
             if st.button("🛑 Stop Scraper", type="secondary", use_container_width=True):
                 success, message = st.session_state.scraper_manager.stop_scraper()
                 if success:
@@ -618,44 +764,115 @@ def main():
         with col2:
             st.subheader("📞 Telegram Settings")
             st.info("Telegram configuration is managed in the scraper file.")
-            
-            # Show current telegram settings (masked)
+              # Show current telegram settings (masked)
             st.text_input("Bot Token", value="*" * 20, disabled=True, type="password")
             st.text_input("Chat ID", value="*" * 10, disabled=True)
     
     with tab4:
-        st.header("📋 System Logs")
+        st.header("📋 System Logs & Process Information")
         
-        col1, col2 = st.columns([3, 1])
+        # Process information section
+        st.subheader("🔍 Process Information")
+        col_proc1, col_proc2 = st.columns(2)
+        
+        with col_proc1:
+            if scraper_status == "Running":
+                process_info = st.session_state.scraper_manager.get_process_info()
+                if process_info:
+                    st.markdown(f"""
+                    **Process Status:** � Running  
+                    **PID:** {process_info['pid']}  
+                    **Status:** {process_info.get('status', 'N/A')}  
+                    """)
+                    if 'cpu_percent' in process_info:
+                        st.markdown(f"**CPU Usage:** {process_info['cpu_percent']:.1f}%")
+                    if 'memory_info' in process_info:
+                        memory_mb = process_info['memory_info'].rss / 1024 / 1024
+                        st.markdown(f"**Memory Usage:** {memory_mb:.1f} MB")
+                    if 'create_time' in process_info:
+                        runtime = datetime.now() - process_info['create_time']
+                        st.markdown(f"**Runtime:** {str(runtime).split('.')[0]}")
+                else:
+                    st.markdown("**Process Status:** 🟢 Running (details unavailable)")
+            else:
+                st.markdown("**Process Status:** 🔴 Stopped")
+        
+        with col_proc2:
+            # File status
+            st.markdown("**File Status:**")
+            if PID_FILE.exists():
+                st.markdown("📄 PID file exists")
+            else:
+                st.markdown("❌ No PID file")
+            
+            if LOG_FILE.exists():
+                log_size = LOG_FILE.stat().st_size / 1024
+                st.markdown(f"📄 Log file: {log_size:.1f} KB")
+            else:
+                st.markdown("❌ No log file")
+        
+        st.divider()
+        
+        # Logs section
+        col1, col2, col3 = st.columns([2, 1, 1])
         
         with col1:
-            st.subheader("📋 Recent Logs")
+            st.subheader("📋 Real-time Logs")
         
         with col2:
-            if st.button("🔄 Refresh Logs"):
+            num_lines = st.selectbox("Lines to show:", [25, 50, 100, 200], index=1)
+        
+        with col3:
+            if st.button("🔄 Refresh Logs", use_container_width=True):
                 st.rerun()
         
-        # Log display
-        current_time = datetime.now()
-        keywords = load_keywords()
-        logs = [
-            f"[{current_time.strftime('%H:%M:%S')}] INFO: Scraper status: {scraper_status}",
-            f"[{(current_time - timedelta(minutes=5)).strftime('%H:%M:%S')}] INFO: Monitoring {len(keywords)} keywords",
-            f"[{(current_time - timedelta(minutes=10)).strftime('%H:%M:%S')}] INFO: Last state update completed",
-        ]
+        # Display real logs from file
+        logs = get_recent_logs(num_lines)
         
-        if scraper_status == "Running":
-            logs.insert(0, f"[{current_time.strftime('%H:%M:%S')}] INFO: ✅ Scraper is actively monitoring")
+        if logs and logs[0] != "No logs available yet.":
+            # Create a container for logs with scroll
+            log_container = st.container()
+            with log_container:
+                st.markdown("```")
+                for log in logs[-20:]:  # Show last 20 for better performance
+                    if any(keyword in log.upper() for keyword in ["ERROR", "FAILED", "EXCEPTION"]):
+                        st.markdown(f"🔴 {log}")
+                    elif any(keyword in log.upper() for keyword in ["WARNING", "WARN"]):
+                        st.markdown(f"🟡 {log}")
+                    elif any(keyword in log.upper() for keyword in ["SUCCESS", "STARTED", "COMPLETED"]):
+                        st.markdown(f"🟢 {log}")
+                    else:
+                        st.markdown(f"ℹ️ {log}")
+                st.markdown("```")
+            
+            # Show all logs in an expander
+            with st.expander(f"📜 View all {len(logs)} log entries"):
+                st.text("\n".join(logs))
         else:
-            logs.insert(0, f"[{current_time.strftime('%H:%M:%S')}] WARNING: ⚠️ Scraper is not running")
+            st.info("📝 No logs available yet. Start the scraper to see activity logs.")
+            
+            # Show some system info instead
+            st.subheader("📊 System Information")
+            keywords = load_keywords()
+            current_time = datetime.now()
+            
+            sample_logs = [
+                f"[{current_time.strftime('%Y-%m-%d %H:%M:%S')}] INFO: Dashboard accessed",
+                f"[{current_time.strftime('%Y-%m-%d %H:%M:%S')}] INFO: Scraper status: {scraper_status}",
+                f"[{current_time.strftime('%Y-%m-%d %H:%M:%S')}] INFO: Monitoring {len(keywords)} keywords",
+                f"[{current_time.strftime('%Y-%m-%d %H:%M:%S')}] INFO: UI loaded successfully"
+            ]
+            
+            for log in sample_logs:
+                if "ERROR" in log or "WARNING" in log:
+                    st.error(log)
+                elif "INFO" in log:
+                    st.info(log)
         
-        for log in logs:
-            if "ERROR" in log or "WARNING" in log:
-                st.error(log)
-            elif "INFO" in log:
-                st.info(log)
-            else:
-                st.text(log)
+        # Auto-refresh for logs
+        if st.checkbox("🔄 Auto-refresh logs (10s)", key="logs_auto_refresh"):
+            time.sleep(10)
+            st.rerun()
     
     # Footer
     st.markdown("---")

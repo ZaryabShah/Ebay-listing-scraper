@@ -40,6 +40,7 @@ import os
 import re
 import sys
 import time
+import signal
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional
@@ -66,7 +67,12 @@ KEYWORDS: List[str] = [
 
 MAX_PAGES: int = 1            # depth per keyword (1 is usually enough)
 POLL_INTERVAL: int = 120      # seconds between successive scans
-STATE_PATH = Path("state.json")
+# ---- Path setup --------------------------------------------------
+from pathlib import Path
+BASE_DIR   = Path(__file__).resolve().parent
+STATE_PATH = BASE_DIR / "state.json"
+LOG_FILE   = BASE_DIR / "scraper.log"
+PID_FILE   = BASE_DIR / "scraper.pid"
 
 # Telegram -----------------------------------------------------------
 TG_BOT_TOKEN = "7639063889:AAFBQ1zxgiFQZn7FcdrSkSJQ821CXjrjTFU"
@@ -118,16 +124,37 @@ MONTH_RE = "|".join(GERMAN_MONTHS.keys())
 DATE_RE = re.compile(
     rf"(?P<day>\d{{1,2}})\.\s*(?P<mon>{MONTH_RE})\.?(?:\s*(?P<year>\d{{4}}))?\s*(?P<hour>\d{{2}}):(?P<minute>\d{{2}})"
 )
+import codecs, io, logging, sys
 
-import logging
+def _safe_stdout() -> io.TextIOWrapper:
+    """
+    Return a TextIOWrapper that always **encodes UTF-8** and replaces
+    unprintable characters (prevents UnicodeEncodeError on Windows).
+    """
+    return io.TextIOWrapper(
+        sys.stdout.buffer,
+        encoding="utf-8",
+        errors="replace",      # <-- ♥  key line
+        line_buffering=True,
+    )
+
+# Install safer stdout/stderr wrappers before logging
+sys.stdout = _safe_stdout()
+sys.stderr = _safe_stdout()
 
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
-    handlers=[logging.StreamHandler()]
+    handlers=[
+        logging.FileHandler(LOG_FILE, encoding="utf-8"),   # full UTF-8 logs
+        logging.StreamHandler(sys.stdout),                 # safe console
+    ],
 )
 
 log = logging.getLogger(__name__)
+
+# Global flag for graceful shutdown
+running = True
 
 def parse_ebay_datetime(ts: str) -> datetime:
     """Convert eBay's German timestamp to a :class:`datetime` (local time).
@@ -252,16 +279,94 @@ def parse_card_text(raw_text: str) -> Dict:
 ###############################################################################
 # ----- SCRAPER ---------------------------------------------------------------
 ###############################################################################
+# ------------------------------------------------------------------
+# Configure Selenium so every page-load goes through the
+# StormProxies back-connect gateway ( => fresh IP each request )
+# ------------------------------------------------------------------
+import requests, time
+from typing import Optional
+
+EU_CC = {           # accept only these ISO-2 codes  (put {"DE"} for Germany-only)
+    "DE","AT","CH","NL","BE","LU","FR","IT","ES","PT","DK","SE","NO","FI",
+    "PL","CZ","SK","HU","IE","GB","GR","RO","BG","HR","SI","EE","LV","LT"
+}
+MAX_ATTEMPTS = 6    # new StormProxies sessions to try each time we create a driver
+GEO_TIMEOUT  = 7    # seconds for ip-api lookup
+
+STORM_HOST = "37.48.118.4"   # your back-connect gateway
+STORM_PORT = 13010
+STORM_USER = None            # fill in if Storm gave you user/pass
+STORM_PASS = None
+
+_last_good_proxy: Optional[str] = None   # ✨ remembered across calls
+
+
+def _build_proxy_arg() -> str:
+    if STORM_USER and STORM_PASS:
+        return f"http://{STORM_USER}:{STORM_PASS}@{STORM_HOST}:{STORM_PORT}"
+    return f"http://{STORM_HOST}:{STORM_PORT}"
+
+
+def _proxy_country(proxy: str) -> Optional[str]:
+    """ISO-2 country for exit IP *through* this proxy (or None on error)."""
+    try:
+        r = requests.get("http://ip-api.com/json",
+                         proxies={"http": proxy, "https": proxy},
+                         timeout=GEO_TIMEOUT)
+        if r.ok:
+            return r.json().get("countryCode")
+    except requests.RequestException:
+        pass
+    return None
+
 
 def configure_driver() -> webdriver.Chrome:
-    options = webdriver.ChromeOptions()
-    options.add_argument("--headless=new")
-    options.add_argument("--disable-gpu")
-    options.add_argument("--no-sandbox")
-    options.add_argument("--window-size=1200,800")
-    # ➡️  PLACEHOLDER for proxy / stealth extensions
-    return webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=options)
+    global _last_good_proxy
 
+    # 0️⃣  First try the remembered “good” proxy (if any)
+    if _last_good_proxy:
+        cc = _proxy_country(_last_good_proxy)
+        if cc in EU_CC:
+            log.info(f"🌍 Re-using last EU proxy (country {cc})")
+            return _start_chrome(_last_good_proxy)
+        else:
+            log.warning(f"❌ Stored proxy country {cc or 'unknown'} is no longer EU – rotating…")
+            _last_good_proxy = None     # drop it
+
+    # 1️⃣  Fresh spins until we hit an EU exit or exhaust attempts
+    for attempt in range(1, MAX_ATTEMPTS + 1):
+        proxy = _build_proxy_arg()  # StormProxies gives a new exit IP per TCP dial
+        cc = _proxy_country(proxy)
+        if cc in EU_CC:
+            log.info(f"✅ Got EU exit ({cc}) on attempt {attempt}")
+            _last_good_proxy = proxy          # remember for next time
+            return _start_chrome(proxy)
+
+        log.warning(f"↻ Attempt {attempt}: exit {cc or 'unknown'} rejected – trying again…")
+        time.sleep(1)
+
+    # 2️⃣  Couldn’t get a fresh EU exit – fall back to the last EU proxy (if any)
+    if _last_good_proxy:
+        log.warning("⚠️  Falling back to stored EU proxy; geo may have changed")
+        return _start_chrome(_last_good_proxy)
+
+    # 3️⃣  Absolute fallback – accept whatever we get
+    log.warning("⚠️  No EU proxy found; using non-EU exit")
+    return _start_chrome(_build_proxy_arg())
+
+
+def _start_chrome(proxy_arg: str) -> webdriver.Chrome:
+    opts = webdriver.ChromeOptions()
+    opts.add_argument("--headless=new")
+    opts.add_argument("--disable-gpu")
+    opts.add_argument("--no-sandbox")
+    opts.add_argument("--window-size=1200,800")
+    opts.add_argument(f"--proxy-server={proxy_arg}")
+
+    return webdriver.Chrome(
+        service=Service(ChromeDriverManager().install()),
+        options=opts,
+    )
 
 def build_url(keyword: str) -> str:
     from urllib.parse import quote_plus
@@ -392,13 +497,43 @@ def save_state(state: Dict[str, str]):
 ###############################################################################
 
 def main():
+    import os
+    from pathlib import Path
+    
+    # Global flag for graceful shutdown
+    global running
+    running = True
+    
+    def signal_handler(sig, frame):
+        global running
+        log.info("🛑 Shutdown signal received - stopping scraper gracefully...")
+        running = False
+    
+    # Register signal handlers for graceful shutdown
+    signal.signal(signal.SIGINT, signal_handler)
+    signal.signal(signal.SIGTERM, signal_handler)
+    
+    # Write PID file for process tracking
+    pid_file = Path("scraper.pid")
+    with open(pid_file, 'w') as f:
+        f.write(str(os.getpid()))
+    
+    log.info(f"🚀 eBay scraper started with PID {os.getpid()}")
+    
     state = load_state()  # keyword -> ISO timestamp str
-    driver = configure_driver()
+    if not STATE_PATH.exists():
+        STATE_PATH.write_text("{}", encoding="utf-8")
+
     log.info("🔄 Starting eBay watcher loop...")
 
 
     try:
-        while True:
+        cycle_count = 0
+        while running:  # Changed from 'while True' to respect shutdown signal
+            cycle_count += 1
+            driver = configure_driver()
+            log.info(f"🔄 Starting scraping cycle #{cycle_count} for {len(KEYWORDS)} keywords")
+            
             for kw in KEYWORDS:
                 last_iso = state.get(kw)
                 log.info(f"🔍 Checking keyword: '{kw}' (last seen: {last_iso or 'never'})")
@@ -410,7 +545,8 @@ def main():
                     listings = scrape_keyword(driver, kw, MAX_PAGES)
                     log.info(f"✅ Found {len(listings)} listings for '{kw}'")
                 except WebDriverException as exc:
-                    log.error(f"WebDriver crashed: {exc}")
+                    log.error(f"🔥 WebDriver crashed: {exc}")
+                    log.info("🔄 Restarting webdriver...")
                     driver.quit()
                     driver = configure_driver()
                     continue
@@ -441,20 +577,27 @@ def main():
                 if newest_seen > last_dt:
                     state[kw] = newest_seen.isoformat()
                     save_state(state)
-                    log.info(f"📝 Updated last_seen for '{kw}' to {newest_seen.isoformat()}")
-
-                # ---- send messages (if any) ----------------------------------------
+                    log.info(f"📝 Updated last_seen for '{kw}' to {newest_seen.isoformat()}")                # ---- send messages (if any) ----------------------------------------
+                if fresh:
+                    log.info(f"📧 Found {len(fresh)} new listings for '{kw}' - sending to Telegram...")
+                
                 for _dt, lst in sorted(fresh, key=lambda t: t[0]):
                     log.info(f"📤 Sending new listing: {lst.get('title')[:60]}")
                     send_telegram_message(fmt_listing_for_telegram(lst))
                     time.sleep(1)          # be polite with Telegram API
 
             # ----- wait before next poll -------------------------------------------
-            log.info(f"⏱ Sleeping for {POLL_INTERVAL} seconds...\n")
+            log.info(f"✅ Completed cycle #{cycle_count}. Sleeping for {POLL_INTERVAL} seconds...")
             time.sleep(POLL_INTERVAL)
 
     finally:
         driver.quit()
+        
+        # Clean up PID file on exit
+        pid_file = PID_FILE
+        if pid_file.exists():
+            pid_file.unlink()
+        log.info("🛑 eBay scraper stopped and cleaned up")
 
 
 if __name__ == "__main__":
