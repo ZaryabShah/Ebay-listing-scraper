@@ -61,7 +61,7 @@ KEYWORDS: List[str] = [
     "Playstation 5",
     "xbox series x",
     "xbox series s",
-    "nintendo switch",
+    # "nintendo switch",
     "steam deck",
 ]
 
@@ -319,40 +319,35 @@ def _proxy_country(proxy: str) -> Optional[str]:
         pass
     return None
 
-
 def configure_driver() -> webdriver.Chrome:
-    global _last_good_proxy
+    """
+    Keep dialling StormProxies until we land on an **EU exit IP**.
+    • Tries MAX_ATTEMPTS quick spins in a row
+    • If still non-EU, sleeps WAIT_BETWEEN_ROUNDS seconds and starts over
+    • Never falls back to a non-EU proxy
+    """
+    WAIT_BETWEEN_ROUNDS = 30   # seconds to pause before a new round of spins
 
-    # 0️⃣  First try the remembered “good” proxy (if any)
-    if _last_good_proxy:
-        cc = _proxy_country(_last_good_proxy)
-        if cc in EU_CC:
-            log.info(f"🌍 Re-using last EU proxy (country {cc})")
-            return _start_chrome(_last_good_proxy)
-        else:
-            log.warning(f"❌ Stored proxy country {cc or 'unknown'} is no longer EU – rotating…")
-            _last_good_proxy = None     # drop it
+    round_nr = 0
+    while True:                                  # repeat until we succeed
+        round_nr += 1
+        for attempt in range(1, MAX_ATTEMPTS + 1):
+            proxy = _build_proxy_arg()           # new exit IP each call
+            cc = _proxy_country(proxy)
+            print(f"{cc or 'unknown'} proxy: {proxy} ")
+            if cc in EU_CC:
+                log.info(f"✅ EU proxy acquired – {cc} "
+                         f"(round {round_nr}, attempt {attempt})")
+                return _start_chrome(proxy)
 
-    # 1️⃣  Fresh spins until we hit an EU exit or exhaust attempts
-    for attempt in range(1, MAX_ATTEMPTS + 1):
-        proxy = _build_proxy_arg()  # StormProxies gives a new exit IP per TCP dial
-        cc = _proxy_country(proxy)
-        if cc in EU_CC:
-            log.info(f"✅ Got EU exit ({cc}) on attempt {attempt}")
-            _last_good_proxy = proxy          # remember for next time
-            return _start_chrome(proxy)
+            log.warning(f"↻ Non-EU exit {cc or 'unknown'} "
+                        f"(round {round_nr}, attempt {attempt}) – retrying…")
+            time.sleep(1)
 
-        log.warning(f"↻ Attempt {attempt}: exit {cc or 'unknown'} rejected – trying again…")
-        time.sleep(1)
-
-    # 2️⃣  Couldn’t get a fresh EU exit – fall back to the last EU proxy (if any)
-    if _last_good_proxy:
-        log.warning("⚠️  Falling back to stored EU proxy; geo may have changed")
-        return _start_chrome(_last_good_proxy)
-
-    # 3️⃣  Absolute fallback – accept whatever we get
-    log.warning("⚠️  No EU proxy found; using non-EU exit")
-    return _start_chrome(_build_proxy_arg())
+        # we’ve exhausted MAX_ATTEMPTS without an EU node
+        log.error(f"❌ No EU proxy after {MAX_ATTEMPTS} spins; "
+                  f"waiting {WAIT_BETWEEN_ROUNDS}s before next round")
+        time.sleep(WAIT_BETWEEN_ROUNDS)
 
 
 def _start_chrome(proxy_arg: str) -> webdriver.Chrome:
@@ -367,6 +362,67 @@ def _start_chrome(proxy_arg: str) -> webdriver.Chrome:
         service=Service(ChromeDriverManager().install()),
         options=opts,
     )
+# ---------------------------------------------------------------------------
+# Quick currency-check helpers
+# ---------------------------------------------------------------------------
+PRICE_XPATH = (
+    "/html/body/div[2]/main/div[1]/div[1]/div[4]/div/div/div[2]/div/"
+    "div[1]/div[3]/div/div/div[1]"
+)
+
+def _first_itm_link(card: Dict) -> str | None:
+    """Return the first /itm/ link from a parsed card dict."""
+    for url in card.get("links", []):
+        if "/itm/" in url:
+            return url
+    return None
+
+def _proxy_passes_currency_check(driver: webdriver.Chrome, itm_url: str) -> bool:
+    """
+    Open the listing page and look at PRICE_XPATH.
+    Return True only if the text contains 'EUR' or the '€' sign.
+    """
+    try:
+        driver.get(itm_url)
+        WebDriverWait(driver, 10).until(
+            EC.presence_of_element_located((By.XPATH, PRICE_XPATH))
+        )
+        price_text = driver.find_element(By.XPATH, PRICE_XPATH).text.upper()
+        log.info(f"💶 Detected price text: {price_text!r}")
+
+        if "EUR" in price_text:
+            log.info("✅ Currency check passed with symbol: 'EUR'")
+            return True
+
+        log.warning("❌ Currency check failed – no 'EUR' found")
+        return False
+    except Exception as e:
+        log.warning(f"⚠️  Currency check failed to load element: {e}")
+        return False
+# ---------------------------------------------------------------------------
+# Validate the current driver for the given keyword
+# ---------------------------------------------------------------------------
+def _ensure_eur_for_keyword(driver: webdriver.Chrome, keyword: str) -> bool:
+    """
+    • Scrape page 1 for *keyword*.
+    • Pick the first /itm/ link.
+    • Return True iff the listing shows EUR (via _proxy_passes_currency_check).
+    """
+    try:
+        page1 = scrape_keyword(driver, keyword, 1)
+        if not page1:
+            log.warning(f"💤 No results for '{keyword}' – cannot validate currency")
+            return False
+
+        itm = _first_itm_link(page1[0])
+        if not itm:
+            log.warning(f"🕳  Couldn’t extract /itm/ link for '{keyword}'")
+            return False
+
+        return _proxy_passes_currency_check(driver, itm)
+    except Exception as exc:
+        log.error(f"⚠️  Currency-validation failed for '{keyword}': {exc}")
+        return False
 
 def build_url(keyword: str) -> str:
     from urllib.parse import quote_plus
@@ -531,10 +587,61 @@ def main():
         cycle_count = 0
         while running:  # Changed from 'while True' to respect shutdown signal
             cycle_count += 1
-            driver = configure_driver()
+                        # ---------------------------------------------------------------------------
+            # obtain a *validated* EU driver before each polling cycle
+            # ---------------------------------------------------------------------------
+            driver = None
+            while driver is None:
+                tmp_driver = configure_driver()             # may take several spins
+                log.info("🔍 Checking proxy with first keyword’s first listing …")
+
+                # scrape only **one page of the first keyword** just to get a listing
+                try:
+                    test_list = scrape_keyword(tmp_driver, KEYWORDS[0], 1)
+                except Exception as e:
+                    log.error(f"Initial scrape failed: {e}")
+                    tmp_driver.quit()
+                    continue
+
+                if not test_list:
+                    log.warning("No listings found on first page – retrying proxy …")
+                    tmp_driver.quit()
+                    continue
+
+                first_link = _first_itm_link(test_list[0])
+                if not first_link:
+                    log.warning("Couldn’t extract /itm/ link – retrying proxy …")
+                    tmp_driver.quit()
+                    continue
+
+                if _proxy_passes_currency_check(tmp_driver, first_link):
+                    log.info("✅ Proxy currency check passed – continuing cycle")
+                    driver = tmp_driver           # we keep this validated driver
+                else:
+                    log.error("❌ Proxy shows non-EUR currency – discarding and retrying")
+                    tmp_driver.quit()
+
             log.info(f"🔄 Starting scraping cycle #{cycle_count} for {len(KEYWORDS)} keywords")
             
             for kw in KEYWORDS:
+                # -------------------------------------------------------------------
+                # keep trying NEW proxies until this keyword shows EUR/€
+                # -------------------------------------------------------------------
+                validated = False
+                while not validated and running:
+                    if driver is None:                      # first time or after failure
+                        driver = configure_driver()
+
+                    log.info(f"🔍 Checking EUR currency for '{kw}' …")
+                    if _ensure_eur_for_keyword(driver, kw):
+                        log.info(f"✅ '{kw}' confirmed EUR – scraping full {MAX_PAGES} page(s)")
+                        validated = True                    # leave the while-retry loop
+                    else:
+                        log.error("❌ Currency mismatch – rotating proxy and retrying keyword")
+                        driver.quit()
+                        driver = None                       # trigger new proxy
+                        continue                            # retry same keyword
+
                 last_iso = state.get(kw)
                 log.info(f"🔍 Checking keyword: '{kw}' (last seen: {last_iso or 'never'})")
                 first_run = last_iso is None
