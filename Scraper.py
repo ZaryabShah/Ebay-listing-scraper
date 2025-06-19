@@ -389,11 +389,15 @@ def _proxy_passes_currency_check(driver: webdriver.Chrome, itm_url: str) -> bool
         )
         price_text = driver.find_element(By.XPATH, PRICE_XPATH).text.upper()
         log.info(f"💶 Detected price text: {price_text!r}")
-
+        if "Ca.EUR" in price_text:
+            log.info("❌ Currency check not passed with 'Ca.EUR'")
+            return False
         if "EUR" in price_text:
             log.info("✅ Currency check passed with symbol: 'EUR'")
             return True
-
+        if "GEBOTE" in price_text:
+            log.info("✅ Currency check passed with bids – assuming EUR")
+            return True
         log.warning("❌ Currency check failed – no 'EUR' found")
         return False
     except Exception as e:
@@ -590,36 +594,11 @@ def main():
                         # ---------------------------------------------------------------------------
             # obtain a *validated* EU driver before each polling cycle
             # ---------------------------------------------------------------------------
-            driver = None
-            while driver is None:
-                tmp_driver = configure_driver()             # may take several spins
-                log.info("🔍 Checking proxy with first keyword’s first listing …")
+            # ─────────────────────────────────────────────────────────────────────────
+            # just grab a fresh EU proxy – currency will be validated per keyword
+            # ─────────────────────────────────────────────────────────────────────────
+            driver = configure_driver()
 
-                # scrape only **one page of the first keyword** just to get a listing
-                try:
-                    test_list = scrape_keyword(tmp_driver, KEYWORDS[0], 1)
-                except Exception as e:
-                    log.error(f"Initial scrape failed: {e}")
-                    tmp_driver.quit()
-                    continue
-
-                if not test_list:
-                    log.warning("No listings found on first page – retrying proxy …")
-                    tmp_driver.quit()
-                    continue
-
-                first_link = _first_itm_link(test_list[0])
-                if not first_link:
-                    log.warning("Couldn’t extract /itm/ link – retrying proxy …")
-                    tmp_driver.quit()
-                    continue
-
-                if _proxy_passes_currency_check(tmp_driver, first_link):
-                    log.info("✅ Proxy currency check passed – continuing cycle")
-                    driver = tmp_driver           # we keep this validated driver
-                else:
-                    log.error("❌ Proxy shows non-EUR currency – discarding and retrying")
-                    tmp_driver.quit()
 
             log.info(f"🔄 Starting scraping cycle #{cycle_count} for {len(KEYWORDS)} keywords")
             
