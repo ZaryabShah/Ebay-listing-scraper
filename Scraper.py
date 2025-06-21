@@ -573,6 +573,26 @@ def save_state(state: Dict[str, str]):
 # ----- MAIN LOOP -------------------------------------------------------------
 ###############################################################################
 
+def cleanup_on_exit():
+    """Clean up resources when shutting down"""
+    global running
+    
+    # Clean up PID file
+    if PID_FILE.exists():
+        try:
+            PID_FILE.unlink()
+            log.info("🧹 Cleaned up PID file")
+        except Exception as e:
+            log.warning(f"⚠️ Failed to remove PID file: {e}")
+    
+    # Clean up state.json file
+    if STATE_PATH.exists():
+        try:
+            STATE_PATH.unlink()
+            log.info("🧹 Cleaned up state.json file")
+        except Exception as e:
+            log.warning(f"⚠️ Failed to remove state.json file: {e}")
+
 def main():
     import os
     from pathlib import Path
@@ -585,6 +605,8 @@ def main():
         global running
         log.info("🛑 Shutdown signal received - stopping scraper gracefully...")
         running = False
+        cleanup_on_exit()
+        sys.exit(0)
     
     # Register signal handlers for graceful shutdown
     signal.signal(signal.SIGINT, signal_handler)
@@ -620,6 +642,11 @@ def main():
             log.info(f"🔄 Starting scraping cycle #{cycle_count} for {len(KEYWORDS)} keywords")
             
             for kw in KEYWORDS:
+                # Check if we should stop before processing each keyword
+                if not running:
+                    log.info("🛑 Stop requested - exiting keyword loop")
+                    break
+                    
                 # -------------------------------------------------------------------
                 # keep trying NEW proxies until this keyword shows EUR/€
                 # -------------------------------------------------------------------
@@ -637,6 +664,11 @@ def main():
                         _safe_quit(driver)
                         driver = None                       # trigger new proxy
                         continue                            # retry same keyword
+
+                # Check again before continuing with scraping
+                if not running:
+                    log.info("🛑 Stop requested - exiting before scraping")
+                    break
 
                 last_iso = state.get(kw)
                 log.info(f"🔍 Checking keyword: '{kw}' (last seen: {last_iso or 'never'})")
@@ -681,25 +713,34 @@ def main():
                     state[kw] = newest_seen.isoformat()
                     save_state(state)
                     log.info(f"📝 Updated last_seen for '{kw}' to {newest_seen.isoformat()}")                # ---- send messages (if any) ----------------------------------------
-                if fresh:
+                if fresh and running:  # Only send if still running
                     log.info(f"📧 Found {len(fresh)} new listings for '{kw}' - sending to Telegram...")
                 
-                for _dt, lst in sorted(fresh, key=lambda t: t[0]):
-                    log.info(f"📤 Sending new listing: {lst.get('title')[:60]}")
-                    send_telegram_message(fmt_listing_for_telegram(lst))
-                    time.sleep(1)          # be polite with Telegram API
+                    for _dt, lst in sorted(fresh, key=lambda t: t[0]):
+                        if not running:  # Check before each message
+                            log.info("🛑 Stop requested - stopping message sending")
+                            break
+                        log.info(f"📤 Sending new listing: {lst.get('title')[:60]}")
+                        send_telegram_message(fmt_listing_for_telegram(lst))
+                        time.sleep(1)          # be polite with Telegram API
 
+            # Check if we should exit before waiting
+            if not running:
+                log.info("🛑 Stop requested - exiting main loop")
+                break
+                
             # ----- wait before next poll -------------------------------------------
             log.info(f"✅ Completed cycle #{cycle_count}. Sleeping for {POLL_INTERVAL} seconds...")
-            time.sleep(POLL_INTERVAL)
+              # Make sleep interruptible by checking running flag every second
+            for i in range(POLL_INTERVAL):
+                if not running:
+                    log.info("🛑 Stop requested during sleep - exiting")
+                    break
+                time.sleep(1)
 
     finally:
         _safe_quit(driver)
-        
-        # Clean up PID file on exit
-        pid_file = PID_FILE
-        if pid_file.exists():
-            pid_file.unlink()
+        cleanup_on_exit()
         log.info("🛑 eBay scraper stopped and cleaned up")
 
 

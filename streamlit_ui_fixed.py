@@ -195,6 +195,14 @@ class ScraperManager:
             if PID_FILE.exists():
                 PID_FILE.unlink()
             
+            # Clean up state.json file
+            if STATE_PATH.exists():
+                try:
+                    STATE_PATH.unlink()
+                    logger.info("🧹 Cleaned up state.json file")
+                except Exception as e:
+                    logger.warning(f"⚠️ Failed to remove state.json file: {e}")
+            
             self.is_running = False
             self.process = None
             self.pid = None
