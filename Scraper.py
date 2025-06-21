@@ -349,19 +349,36 @@ def configure_driver() -> webdriver.Chrome:
                   f"waiting {WAIT_BETWEEN_ROUNDS}s before next round")
         time.sleep(WAIT_BETWEEN_ROUNDS)
 
+import tempfile, shutil
+def _safe_quit(drv: Optional[webdriver.Chrome]):
+    if drv:
+        try:
+            drv.quit()
+            time.sleep(2)  # give OS time to release locks
+        finally:
+            shutil.rmtree(getattr(drv, "_profile_dir", ""), ignore_errors=True)
 
 def _start_chrome(proxy_arg: str) -> webdriver.Chrome:
+    profile_dir = tempfile.mkdtemp(prefix="chrome-profile-")
     opts = webdriver.ChromeOptions()
     opts.add_argument("--headless=new")
     opts.add_argument("--disable-gpu")
     opts.add_argument("--no-sandbox")
     opts.add_argument("--window-size=1200,800")
     opts.add_argument(f"--proxy-server={proxy_arg}")
+    opts.add_argument(f"--user-data-dir={profile_dir}")  # ✅ isolate profile
 
-    return webdriver.Chrome(
-        service=Service(ChromeDriverManager().install()),
-        options=opts,
-    )
+    try:
+        drv = webdriver.Chrome(
+            service=Service(ChromeDriverManager().install()),
+            options=opts,
+        )
+        drv._profile_dir = profile_dir  # track for cleanup
+        return drv
+    except Exception:
+        shutil.rmtree(profile_dir, ignore_errors=True)
+        raise
+
 # ---------------------------------------------------------------------------
 # Quick currency-check helpers
 # ---------------------------------------------------------------------------
@@ -617,7 +634,7 @@ def main():
                         validated = True                    # leave the while-retry loop
                     else:
                         log.error("❌ Currency mismatch – rotating proxy and retrying keyword")
-                        driver.quit()
+                        _safe_quit(driver)
                         driver = None                       # trigger new proxy
                         continue                            # retry same keyword
 
@@ -633,7 +650,7 @@ def main():
                 except WebDriverException as exc:
                     log.error(f"🔥 WebDriver crashed: {exc}")
                     log.info("🔄 Restarting webdriver...")
-                    driver.quit()
+                    _safe_quit(driver)
                     driver = configure_driver()
                     continue
 
@@ -677,7 +694,7 @@ def main():
             time.sleep(POLL_INTERVAL)
 
     finally:
-        driver.quit()
+        _safe_quit(driver)
         
         # Clean up PID file on exit
         pid_file = PID_FILE
