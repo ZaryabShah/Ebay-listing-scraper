@@ -154,10 +154,13 @@ class ScraperManager:
         
         try:
             # Start the process
+            log_file = open(LOG_FILE, "a")
+
             self.process = subprocess.Popen([
                 sys.executable, SCRAPER_SCRIPT
-            ], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, 
+            ], stdout=log_file, stderr=log_file, text=True, 
             creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if os.name == 'nt' else 0)
+
             
             self.pid = self.process.pid
             self.is_running = True
