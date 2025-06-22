@@ -154,12 +154,16 @@ class ScraperManager:
         
         try:
             # Start the process
-            log_file = open(LOG_FILE, "a")
+            log_file = open(LOG_FILE, "a", buffering=1)       # line-buffered
 
-            self.process = subprocess.Popen([
-                sys.executable, SCRAPER_SCRIPT
-            ], stdout=log_file, stderr=log_file, text=True, 
-            creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if os.name == 'nt' else 0)
+            self.process = subprocess.Popen(
+                [sys.executable, "-u", SCRAPER_SCRIPT],       # <- -u = unbuffered
+                stdout=log_file,
+                stderr=log_file,
+                text=True,
+                bufsize=1,                                    # line buffering
+                creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0,
+            )
 
             
             self.pid = self.process.pid

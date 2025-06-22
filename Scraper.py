@@ -53,6 +53,7 @@ from selenium.webdriver.common.by import By
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.ui import WebDriverWait
 from webdriver_manager.chrome import ChromeDriverManager
+from selenium.common.exceptions import TimeoutException
 
 ###############################################################################
 # ----- USER CONFIG -----------------------------------------------------------
@@ -374,6 +375,8 @@ def _start_chrome(proxy_arg: str) -> webdriver.Chrome:
             options=opts,
         )
         drv._profile_dir = profile_dir  # track for cleanup
+        drv.set_page_load_timeout(30)
+        drv.set_script_timeout(30)
         return drv
     except Exception:
         shutil.rmtree(profile_dir, ignore_errors=True)
@@ -400,7 +403,14 @@ def _proxy_passes_currency_check(driver: webdriver.Chrome, itm_url: str) -> bool
     Return True only if the text contains 'EUR' or the '€' sign.
     """
     try:
-        driver.get(itm_url)
+        try:
+            driver.get(itm_url)
+        except TimeoutException:
+            log.warning("⏱ Timeout while checking currency page – retrying driver")
+            _safe_quit(driver)
+            driver = configure_driver()
+            return _proxy_passes_currency_check(driver, itm_url)  # retry once with new driver
+
         WebDriverWait(driver, 10).until(
             EC.presence_of_element_located((By.XPATH, PRICE_XPATH))
         )
@@ -462,7 +472,14 @@ def scrape_keyword(driver: webdriver.Chrome, keyword: str, max_pages: int) -> Li
     next_url = build_url(keyword)
 
     while page_num <= max_pages and next_url:
-        driver.get(next_url)
+        try:
+            driver.get(next_url)
+        except TimeoutException:
+            log.warning("⏱ Page-load timed-out in scrape_keyword, recycling driver")
+            _safe_quit(driver)
+            driver = configure_driver()
+            continue  # retry with new driver
+
         try:
             WebDriverWait(driver, 10).until(
                 EC.presence_of_element_located((By.XPATH, PAGE_READY_XPATH))
