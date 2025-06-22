@@ -147,7 +147,7 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
     handlers=[
-        logging.FileHandler(LOG_FILE, encoding="utf-8"),   # full UTF-8 logs
+        # logging.FileHandler(LOG_FILE, encoding="utf-8"),   # full UTF-8 logs
         logging.StreamHandler(sys.stdout),                 # safe console
     ],
 )
@@ -349,6 +349,19 @@ def configure_driver() -> webdriver.Chrome:
         log.error(f"❌ No EU proxy after {MAX_ATTEMPTS} spins; "
                   f"waiting {WAIT_BETWEEN_ROUNDS}s before next round")
         time.sleep(WAIT_BETWEEN_ROUNDS)
+from selenium.common.exceptions import WebDriverException, TimeoutException
+
+def safe_get(drv: webdriver.Chrome, url: str) -> webdriver.Chrome:
+    """Try to load *url*. If the driver is dead, spin up a fresh one and return it."""
+    try:
+        drv.get(url)
+        return drv
+    except (TimeoutException, WebDriverException):
+        log.warning("🧨 Driver died or hung – rebuilding …")
+        _safe_quit(drv)
+        new_drv = configure_driver()
+        new_drv.get(url)
+        return new_drv
 
 import tempfile, shutil
 def _safe_quit(drv: Optional[webdriver.Chrome]):
@@ -365,6 +378,7 @@ def _start_chrome(proxy_arg: str) -> webdriver.Chrome:
     opts.add_argument("--headless=new")
     opts.add_argument("--disable-gpu")
     opts.add_argument("--no-sandbox")
+    opts.add_argument("--disable-dev-shm-usage")
     opts.add_argument("--window-size=1200,800")
     opts.add_argument(f"--proxy-server={proxy_arg}")
     opts.add_argument(f"--user-data-dir={profile_dir}")  # ✅ isolate profile
@@ -404,7 +418,7 @@ def _proxy_passes_currency_check(driver: webdriver.Chrome, itm_url: str) -> bool
     """
     try:
         try:
-            driver.get(itm_url)
+            driver = safe_get(driver, itm_url)
         except TimeoutException:
             log.warning("⏱ Timeout while checking currency page – retrying driver")
             _safe_quit(driver)
@@ -473,7 +487,8 @@ def scrape_keyword(driver: webdriver.Chrome, keyword: str, max_pages: int) -> Li
 
     while page_num <= max_pages and next_url:
         try:
-            driver.get(next_url)
+            driver = safe_get(driver, next_url)
+
         except TimeoutException:
             log.warning("⏱ Page-load timed-out in scrape_keyword, recycling driver")
             _safe_quit(driver)
