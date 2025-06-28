@@ -41,6 +41,10 @@ import re
 import sys
 import time
 import signal
+import psutil
+import traceback
+import shutil
+import tempfile
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional
@@ -62,8 +66,8 @@ KEYWORDS: List[str] = [
     "Playstation 5",
     "xbox series x",
     "xbox series s",
-    # "nintendo switch",
     "steam deck",
+    "playstation 4",
 ]
 
 MAX_PAGES: int = 1            # depth per keyword (1 is usually enough)
@@ -364,37 +368,99 @@ def safe_get(drv: webdriver.Chrome, url: str) -> webdriver.Chrome:
         return new_drv
 
 import tempfile, shutil
+
+def _kill_chrome_processes():
+    """Kill all Chrome processes to prevent resource leaks"""
+    try:
+        killed_count = 0
+        for proc in psutil.process_iter(['name', 'pid']):
+            try:
+                proc_name = proc.info['name']
+                if proc_name and ('chrome' in proc_name.lower() or 'chromedriver' in proc_name.lower()):
+                    proc.terminate()
+                    try:
+                        proc.wait(timeout=3)
+                        killed_count += 1
+                    except psutil.TimeoutExpired:
+                        proc.kill()
+                        killed_count += 1
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                pass
+        if killed_count > 0:
+            log.info(f"🧹 Force-killed {killed_count} Chrome processes")
+    except Exception as e:
+        log.warning(f"⚠️ Chrome cleanup failed: {str(e)}")
+
 def _safe_quit(drv: Optional[webdriver.Chrome]):
     if drv:
         try:
             drv.quit()
-            time.sleep(2)  # give OS time to release locks
+        except Exception as e:
+            log.warning(f"⚠️ Driver quit failed: {str(e)}")
         finally:
-            shutil.rmtree(getattr(drv, "_profile_dir", ""), ignore_errors=True)
+            _kill_chrome_processes()
+            time.sleep(1)
+            profile_dir = getattr(drv, "_profile_dir", "")
+            if profile_dir:
+                shutil.rmtree(profile_dir, ignore_errors=True)
 
 def _start_chrome(proxy_arg: str) -> webdriver.Chrome:
-    profile_dir = tempfile.mkdtemp(prefix="chrome-profile-")
-    opts = webdriver.ChromeOptions()
-    opts.add_argument("--headless=new")
-    opts.add_argument("--disable-gpu")
-    opts.add_argument("--no-sandbox")
-    opts.add_argument("--disable-dev-shm-usage")
-    opts.add_argument("--window-size=1200,800")
-    opts.add_argument(f"--proxy-server={proxy_arg}")
-    opts.add_argument(f"--user-data-dir={profile_dir}")  # ✅ isolate profile
+    MAX_RETRIES = 3
+    for attempt in range(MAX_RETRIES):
+        try:
+            profile_dir = tempfile.mkdtemp(prefix="chrome-profile-")
+            opts = webdriver.ChromeOptions()
+            opts.add_argument("--headless=new")
+            opts.add_argument("--disable-gpu")
+            opts.add_argument("--no-sandbox")
+            opts.add_argument("--disable-dev-shm-usage")
+            opts.add_argument("--disable-features=NetworkService")
+            opts.add_argument("--window-size=1200,800")
+            opts.add_argument(f"--proxy-server={proxy_arg}")
+            opts.add_argument(f"--user-data-dir={profile_dir}")
+            
+            # Add crash prevention flags
+            opts.add_argument("--disable-extensions")
+            opts.add_argument("--disable-browser-side-navigation")
+            opts.add_argument("--disable-gpu-sandbox")
+            opts.add_argument("--no-zygote")
+            opts.add_argument("--single-process")
+            opts.add_argument("--disk-cache-size=0")
+            opts.add_argument("--disable-infobars")
+            opts.add_argument("--disable-breakpad")
+            opts.add_argument("--disable-background-timer-throttling")
+            opts.add_argument("--disable-backgrounding-occluded-windows")
+            opts.add_argument("--disable-renderer-backgrounding")
 
-    try:
-        drv = webdriver.Chrome(
-            service=Service(ChromeDriverManager().install()),
-            options=opts,
-        )
-        drv._profile_dir = profile_dir  # track for cleanup
-        drv.set_page_load_timeout(30)
-        drv.set_script_timeout(30)
-        return drv
-    except Exception:
-        shutil.rmtree(profile_dir, ignore_errors=True)
-        raise
+            service = Service(
+                ChromeDriverManager().install(),
+                service_args=["--verbose", "--log-path=chromedriver.log"]
+            )
+            
+            drv = webdriver.Chrome(service=service, options=opts)
+            drv._profile_dir = profile_dir
+            drv.set_page_load_timeout(25)  # Reduced timeout
+            drv.set_script_timeout(20)
+            log.info(f"✅ Chrome driver started successfully (attempt {attempt+1})")
+            return drv
+            
+        except Exception as e:
+            error_msg = str(e)
+            if "DevToolsActivePort" in error_msg and attempt < MAX_RETRIES - 1:
+                log.warning(f"⚠️ Chrome startup failed (attempt {attempt+1}): DevToolsActivePort error, retrying...")
+                _kill_chrome_processes()
+                time.sleep(3)
+                continue
+            elif attempt < MAX_RETRIES - 1:
+                log.warning(f"⚠️ Chrome startup failed (attempt {attempt+1}): {error_msg}, retrying...")
+                time.sleep(2)
+                continue
+            else:
+                log.error(f"❌ Chrome startup failed after {MAX_RETRIES} attempts: {traceback.format_exc()}")
+                shutil.rmtree(profile_dir, ignore_errors=True)
+                raise
+    
+    raise Exception("Failed to start Chrome after all retries")
 
 # ---------------------------------------------------------------------------
 # Quick currency-check helpers
@@ -416,34 +482,56 @@ def _proxy_passes_currency_check(driver: webdriver.Chrome, itm_url: str) -> bool
     Open the listing page and look at PRICE_XPATH.
     Return True only if the text contains 'EUR' or the '€' sign.
     """
-    try:
+    for attempt in range(2):
         try:
-            driver = safe_get(driver, itm_url)
-        except TimeoutException:
-            log.warning("⏱ Timeout while checking currency page – retrying driver")
-            _safe_quit(driver)
-            driver = configure_driver()
-            return _proxy_passes_currency_check(driver, itm_url)  # retry once with new driver
+            try:
+                driver = safe_get(driver, itm_url)
+            except TimeoutException:
+                if attempt == 0:
+                    log.warning("⏱ Timeout while checking currency page – retrying with new driver")
+                    _safe_quit(driver)
+                    driver = configure_driver()
+                    continue
+                else:
+                    log.warning("💤 Currency check timed out completely")
+                    return False
 
-        WebDriverWait(driver, 10).until(
-            EC.presence_of_element_located((By.XPATH, PRICE_XPATH))
-        )
-        price_text = driver.find_element(By.XPATH, PRICE_XPATH).text.upper()
-        log.info(f"💶 Detected price text: {price_text!r}")
-        if "Ca.EUR" in price_text:
-            log.info("❌ Currency check not passed with 'Ca.EUR'")
+            WebDriverWait(driver, 10).until(
+                EC.presence_of_element_located((By.XPATH, PRICE_XPATH))
+            )
+            price_text = driver.find_element(By.XPATH, PRICE_XPATH).text.upper()
+            log.info(f"💶 Detected price text: {price_text!r}")
+            
+            if "Ca.EUR" in price_text:
+                log.info("❌ Currency check not passed with 'Ca.EUR'")
+                return False
+            if "EUR" in price_text:
+                log.info("✅ Currency check passed with symbol: 'EUR' or '€'")
+                return True
+            if "GEBOTE" in price_text:
+                log.info("✅ Currency check passed with bids – assuming EUR")
+                return True
+            log.warning("❌ Currency check failed – no 'EUR' found")
             return False
-        if "EUR" in price_text:
-            log.info("✅ Currency check passed with symbol: 'EUR'")
-            return True
-        if "GEBOTE" in price_text:
-            log.info("✅ Currency check passed with bids – assuming EUR")
-            return True
-        log.warning("❌ Currency check failed – no 'EUR' found")
-        return False
-    except Exception as e:
-        log.warning(f"⚠️  Currency check failed to load element: {e}")
-        return False
+            
+        except TimeoutException:
+            if attempt == 0:
+                log.warning("⏱ Currency check timeout, retrying with new driver...")
+                _safe_quit(driver)
+                driver = configure_driver()
+                continue
+            log.warning("💤 Currency check timed out completely")
+            return False
+        except Exception as e:
+            log.error(f"⚠️ Currency check failed: {str(e)}")
+            if attempt == 0:
+                log.warning("🔄 Retrying currency check with new driver...")
+                _safe_quit(driver)
+                driver = configure_driver()
+                continue
+            return False
+    
+    return False
 # ---------------------------------------------------------------------------
 # Validate the current driver for the given keyword
 # ---------------------------------------------------------------------------
@@ -577,7 +665,7 @@ def send_telegram_message(html_text: str):
     }
 
     try:
-        r = requests.post(f"{API_BASE}/sendMessage", json=payload, proxies=proxies, timeout=30)
+        r = requests.post(f"{API_BASE}/sendMessage", json=payload, timeout=30)
         if not r.ok:
             log.warning(f"Telegram API error {r.status_code}: {r.text}")
 
@@ -592,14 +680,49 @@ def send_telegram_message(html_text: str):
 def load_state() -> Dict[str, str]:
     if STATE_PATH.exists():
         try:
-            return json.loads(STATE_PATH.read_text("utf‑8"))
-        except Exception:
-            pass
+            # Create atomic read to prevent partial reads
+            with open(STATE_PATH, 'r', encoding='utf-8') as f:
+                data = f.read()
+            if data.strip():  # Check if file is not empty
+                return json.loads(data)
+            else:
+                log.warning("⚠️ Empty state file, starting fresh")
+                return {}
+        except json.JSONDecodeError as e:
+            log.error(f"❌ Corrupt state file (JSON error): {str(e)}")
+            # Backup corrupted file
+            corrupt_file = STATE_PATH.with_name(f"state_corrupt_{int(time.time())}.json")
+            try:
+                shutil.copy(STATE_PATH, corrupt_file)
+                log.info(f"📁 Backed up corrupt state to: {corrupt_file}")
+            except Exception:
+                pass
+            return {}
+        except Exception as e:
+            log.error(f"❌ Failed to load state file: {str(e)}")
+            return {}
     return {}
 
 
 def save_state(state: Dict[str, str]):
-    STATE_PATH.write_text(json.dumps(state, ensure_ascii=False, indent=2), "utf‑8")
+    try:
+        # Atomic write to prevent corruption
+        temp_path = STATE_PATH.with_name(f"state_temp_{os.getpid()}.json")
+        with open(temp_path, 'w', encoding='utf-8') as f:
+            json.dump(state, f, ensure_ascii=False, indent=2)
+        
+        # Atomic rename (works on both Windows and Unix)
+        if os.name == 'nt':  # Windows
+            if STATE_PATH.exists():
+                STATE_PATH.unlink()
+        os.rename(temp_path, STATE_PATH)
+        log.debug(f"💾 State saved successfully with {len(state)} keywords")
+    except Exception as e:
+        log.error(f"❌ Failed to save state: {str(e)}")
+        # Clean up temp file if it exists
+        temp_path = STATE_PATH.with_name(f"state_temp_{os.getpid()}.json")
+        if temp_path.exists():
+            temp_path.unlink()
 
 ###############################################################################
 # ----- MAIN LOOP -------------------------------------------------------------
@@ -624,6 +747,25 @@ def cleanup_on_exit():
             log.info("🧹 Cleaned up state.json file")
         except Exception as e:
             log.warning(f"⚠️ Failed to remove state.json file: {e}")
+
+def check_system_resources():
+    """Monitor system resources and return False if critical"""
+    try:
+        mem = psutil.virtual_memory()
+        if mem.percent > 90:
+            log.warning(f"⚠️ High memory usage: {mem.percent}%")
+            return False
+        
+        # Check available disk space
+        disk = psutil.disk_usage('.')
+        if disk.percent > 95:
+            log.warning(f"⚠️ Low disk space: {disk.percent}% used")
+            return False
+            
+        return True
+    except Exception as e:
+        log.warning(f"⚠️ Resource monitoring failed: {str(e)}")
+        return True  # Don't block if monitoring fails
 
 def main():
     import os
@@ -656,20 +798,34 @@ def main():
         STATE_PATH.write_text("{}", encoding="utf-8")
 
     log.info("🔄 Starting eBay watcher loop...")
-
-
     try:
         cycle_count = 0
+        driver = None
+        
         while running:  # Changed from 'while True' to respect shutdown signal
             cycle_count += 1
-                        # ---------------------------------------------------------------------------
-            # obtain a *validated* EU driver before each polling cycle
-            # ---------------------------------------------------------------------------
-            # ─────────────────────────────────────────────────────────────────────────
-            # just grab a fresh EU proxy – currency will be validated per keyword
-            # ─────────────────────────────────────────────────────────────────────────
-            driver = configure_driver()
-
+            
+            # Check system resources before starting cycle
+            if not check_system_resources():
+                log.error("🚨 Critical resource shortage, cleaning up and restarting driver")
+                if driver:
+                    _safe_quit(driver)
+                    driver = None
+                _kill_chrome_processes()
+                time.sleep(10)
+                continue
+            
+            # Periodic driver restart to prevent memory leaks
+            if cycle_count % 10 == 0 or driver is None:  # Every 10 cycles or first time
+                log.info(f"🔄 {'Periodic' if driver else 'Initial'} driver refresh (cycle #{cycle_count})")
+                if driver:
+                    _safe_quit(driver)
+                driver = configure_driver()
+                time.sleep(2)
+            
+            # If no driver exists, create one
+            if driver is None:
+                driver = configure_driver()
 
             log.info(f"🔄 Starting scraping cycle #{cycle_count} for {len(KEYWORDS)} keywords")
             
@@ -683,19 +839,38 @@ def main():
                 # keep trying NEW proxies until this keyword shows EUR/€
                 # -------------------------------------------------------------------
                 validated = False
-                while not validated and running:
-                    if driver is None:                      # first time or after failure
+                validation_attempts = 0
+                max_validation_attempts = 5
+                
+                while not validated and running and validation_attempts < max_validation_attempts:
+                    validation_attempts += 1
+                    
+                    if driver is None:  # first time or after failure
                         driver = configure_driver()
 
-                    log.info(f"🔍 Checking EUR currency for '{kw}' …")
-                    if _ensure_eur_for_keyword(driver, kw):
-                        log.info(f"✅ '{kw}' confirmed EUR – scraping full {MAX_PAGES} page(s)")
-                        validated = True                    # leave the while-retry loop
-                    else:
-                        log.error("❌ Currency mismatch – rotating proxy and retrying keyword")
+                    log.info(f"🔍 Checking EUR currency for '{kw}' (attempt {validation_attempts})…")
+                    try:
+                        if _ensure_eur_for_keyword(driver, kw):
+                            log.info(f"✅ '{kw}' confirmed EUR – scraping full {MAX_PAGES} page(s)")
+                            validated = True  # leave the while-retry loop
+                        else:
+                            log.error(f"❌ Currency mismatch for '{kw}' – rotating proxy and retrying")
+                            _safe_quit(driver)
+                            driver = None  # trigger new proxy
+                            time.sleep(2)  # Small delay before retry
+                            continue  # retry same keyword
+                    except Exception as e:
+                        log.error(f"💥 Critical error during currency validation: {str(e)}")
+                        log.error(traceback.format_exc())
                         _safe_quit(driver)
-                        driver = None                       # trigger new proxy
-                        continue                            # retry same keyword
+                        driver = None
+                        time.sleep(5)
+                        continue
+
+                # If validation failed after max attempts, skip this keyword
+                if not validated:
+                    log.error(f"❌ Skipping keyword '{kw}' after {max_validation_attempts} validation attempts")
+                    continue
 
                 # Check again before continuing with scraping
                 if not running:
@@ -712,10 +887,15 @@ def main():
                     listings = scrape_keyword(driver, kw, MAX_PAGES)
                     log.info(f"✅ Found {len(listings)} listings for '{kw}'")
                 except WebDriverException as exc:
-                    log.error(f"🔥 WebDriver crashed: {exc}")
+                    log.error(f"🔥 WebDriver crashed during scraping: {exc}")
+                    log.error(traceback.format_exc())
                     log.info("🔄 Restarting webdriver...")
                     _safe_quit(driver)
                     driver = configure_driver()
+                    continue
+                except Exception as exc:
+                    log.error(f"💥 Unexpected error during scraping: {exc}")
+                    log.error(traceback.format_exc())
                     continue
 
                 # ---- decide what to do with the results ---------------------------
@@ -744,7 +924,9 @@ def main():
                 if newest_seen > last_dt:
                     state[kw] = newest_seen.isoformat()
                     save_state(state)
-                    log.info(f"📝 Updated last_seen for '{kw}' to {newest_seen.isoformat()}")                # ---- send messages (if any) ----------------------------------------
+                    log.info(f"📝 Updated last_seen for '{kw}' to {newest_seen.isoformat()}")
+
+                # ---- send messages (if any) ----------------------------------------
                 if fresh and running:  # Only send if still running
                     log.info(f"📧 Found {len(fresh)} new listings for '{kw}' - sending to Telegram...")
                 
@@ -752,9 +934,12 @@ def main():
                         if not running:  # Check before each message
                             log.info("🛑 Stop requested - stopping message sending")
                             break
-                        log.info(f"📤 Sending new listing: {lst.get('title')[:60]}")
-                        send_telegram_message(fmt_listing_for_telegram(lst))
-                        time.sleep(1)          # be polite with Telegram API
+                        try:
+                            log.info(f"📤 Sending new listing: {lst.get('title', 'No title')[:60]}")
+                            send_telegram_message(fmt_listing_for_telegram(lst))
+                            time.sleep(1)  # be polite with Telegram API
+                        except Exception as e:
+                            log.error(f"❌ Failed to send Telegram message: {str(e)}")
 
             # Check if we should exit before waiting
             if not running:
@@ -763,15 +948,20 @@ def main():
                 
             # ----- wait before next poll -------------------------------------------
             log.info(f"✅ Completed cycle #{cycle_count}. Sleeping for {POLL_INTERVAL} seconds...")
-              # Make sleep interruptible by checking running flag every second
+            # Make sleep interruptible by checking running flag every second
             for i in range(POLL_INTERVAL):
                 if not running:
                     log.info("🛑 Stop requested during sleep - exiting")
                     break
                 time.sleep(1)
 
+    except Exception as e:
+        log.error(f"💥 Critical error in main loop: {str(e)}")
+        log.error(traceback.format_exc())
     finally:
-        _safe_quit(driver)
+        if 'driver' in locals() and driver:
+            _safe_quit(driver)
+        _kill_chrome_processes()
         cleanup_on_exit()
         log.info("🛑 eBay scraper stopped and cleaned up")
 
