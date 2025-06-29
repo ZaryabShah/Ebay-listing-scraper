@@ -70,7 +70,13 @@ KEYWORDS: List[str] = [
     "playstation 4",
 ]
 
-MAX_PAGES: int = 1            # depth per keyword (1 is usually enough)
+# Complete eBay URLs to monitor (alongside keywords)
+COMPLETE_URLS: List[str] = [
+    "https://www.ebay.de/b/Spielekonsolen/139971/bn_466720?LH_BIN=1&LH_ItemCondition=1000&_sop=10&mag=1&rt=nc",
+    # Add your complete eBay search URLs here
+]
+
+MAX_PAGES: int = 1            # depth per keyword/URL (1 is usually enough)
 POLL_INTERVAL: int = 120      # seconds between successive scans
 # ---- Path setup --------------------------------------------------
 from pathlib import Path
@@ -92,8 +98,14 @@ EBAY_SEARCH_TEMPLATE = (
     "https://www.ebay.de/sch/i.html?_from=R40&_nkw={query}&_sacat=139971"
     "&_sop=10&LH_BIN=1&rt=nc&LH_PrefLoc=3"
 )
-XPATH_BASE = "/html/body/div[5]/div[4]/div[3]/div[1]/div[3]/ul/li[{}]/div"
-PAGE_READY_XPATH = XPATH_BASE.format(1)
+
+# XPath for keyword searches
+XPATH_BASE_KEYWORD = "/html/body/div[5]/div[4]/div[3]/div[1]/div[3]/ul/li[{}]/div"
+PAGE_READY_XPATH_KEYWORD = XPATH_BASE_KEYWORD.format(1)
+
+# XPath for complete URL searches
+XPATH_BASE_URL = "/html/body/div[2]/div[2]/section[3]/section[3]/ul/li[{}]"
+PAGE_READY_XPATH_URL = XPATH_BASE_URL.format(1)
 
 PREFIXES_TO_STRIP = [
     "NEUES ANGEBOT",
@@ -418,7 +430,7 @@ def _start_chrome(proxy_arg: str) -> webdriver.Chrome:
             opts.add_argument("--window-size=1200,800")
             opts.add_argument(f"--proxy-server={proxy_arg}")
             opts.add_argument(f"--user-data-dir={profile_dir}")
-            
+
             # Add crash prevention flags
             opts.add_argument("--disable-extensions")
             opts.add_argument("--disable-browser-side-navigation")
@@ -436,14 +448,14 @@ def _start_chrome(proxy_arg: str) -> webdriver.Chrome:
                 ChromeDriverManager().install(),
                 service_args=["--verbose", "--log-path=chromedriver.log"]
             )
-            
+
             drv = webdriver.Chrome(service=service, options=opts)
             drv._profile_dir = profile_dir
             drv.set_page_load_timeout(25)  # Reduced timeout
             drv.set_script_timeout(20)
             log.info(f"✅ Chrome driver started successfully (attempt {attempt+1})")
             return drv
-            
+
         except Exception as e:
             error_msg = str(e)
             if "DevToolsActivePort" in error_msg and attempt < MAX_RETRIES - 1:
@@ -459,7 +471,7 @@ def _start_chrome(proxy_arg: str) -> webdriver.Chrome:
                 log.error(f"❌ Chrome startup failed after {MAX_RETRIES} attempts: {traceback.format_exc()}")
                 shutil.rmtree(profile_dir, ignore_errors=True)
                 raise
-    
+
     raise Exception("Failed to start Chrome after all retries")
 
 # ---------------------------------------------------------------------------
@@ -501,7 +513,7 @@ def _proxy_passes_currency_check(driver: webdriver.Chrome, itm_url: str) -> bool
             )
             price_text = driver.find_element(By.XPATH, PRICE_XPATH).text.upper()
             log.info(f"💶 Detected price text: {price_text!r}")
-            
+
             if "Ca.EUR" in price_text:
                 log.info("❌ Currency check not passed with 'Ca.EUR'")
                 return False
@@ -513,7 +525,7 @@ def _proxy_passes_currency_check(driver: webdriver.Chrome, itm_url: str) -> bool
                 return True
             log.warning("❌ Currency check failed – no 'EUR' found")
             return False
-            
+
         except TimeoutException:
             if attempt == 0:
                 log.warning("⏱ Currency check timeout, retrying with new driver...")
@@ -530,7 +542,7 @@ def _proxy_passes_currency_check(driver: webdriver.Chrome, itm_url: str) -> bool
                 driver = configure_driver()
                 continue
             return False
-    
+
     return False
 # ---------------------------------------------------------------------------
 # Validate the current driver for the given keyword
@@ -549,13 +561,41 @@ def _ensure_eur_for_keyword(driver: webdriver.Chrome, keyword: str) -> bool:
 
         itm = _first_itm_link(page1[0])
         if not itm:
-            log.warning(f"🕳  Couldn’t extract /itm/ link for '{keyword}'")
+            log.warning(f"🕳  Couldn't extract /itm/ link for '{keyword}'")
             return False
 
         return _proxy_passes_currency_check(driver, itm)
     except Exception as exc:
         log.error(f"⚠️  Currency-validation failed for '{keyword}': {exc}")
         return False
+
+
+def _ensure_eur_for_search_input(driver: webdriver.Chrome, search_input: str) -> bool:
+    """
+    Universal currency validation for both keywords and complete URLs.
+    • For keywords: scrape page 1 and pick the first /itm/ link.
+    • For URLs: scrape page 1 and pick the first /itm/ link.
+    • Return True iff the listing shows EUR (via _proxy_passes_currency_check).
+    """
+    try:
+        page1 = scrape_search_input(driver, search_input, 1)
+        if not page1:
+            identifier = search_input[:50] + "..." if len(search_input) > 50 else search_input
+            log.warning(f"💤 No results for '{identifier}' – cannot validate currency")
+            return False
+
+        itm = _first_itm_link(page1[0])
+        if not itm:
+            identifier = search_input[:50] + "..." if len(search_input) > 50 else search_input
+            log.warning(f"🕳  Couldn't extract /itm/ link for '{identifier}'")
+            return False
+
+        return _proxy_passes_currency_check(driver, itm)
+    except Exception as exc:
+        identifier = search_input[:50] + "..." if len(search_input) > 50 else search_input
+        log.error(f"⚠️  Currency-validation failed for '{identifier}': {exc}")
+        return False
+
 
 def build_url(keyword: str) -> str:
     from urllib.parse import quote_plus
@@ -567,39 +607,45 @@ def extract_links(elem) -> List[str]:
     return sorted({a.get_attribute("href") for a in elem.find_elements(By.TAG_NAME, "a") if a.get_attribute("href")})
 
 
-def scrape_keyword(driver: webdriver.Chrome, keyword: str, max_pages: int) -> List[Dict]:
-    """Scrape *up to* ``max_pages`` and return a list of parsed cards."""
+def is_complete_url(input_str: str) -> bool:
+    """Check if input is a complete eBay URL"""
+    return input_str.startswith(("http://", "https://")) and "ebay" in input_str.lower()
+
+
+def scrape_url(driver: webdriver.Chrome, url: str, max_pages: int, url_identifier: str) -> List[Dict]:
+    """Scrape *up to* ``max_pages`` from a complete eBay URL and return a list of parsed cards."""
     results: List[Dict] = []
     page_num = 1
-    next_url = build_url(keyword)
+    next_url = url
 
     while page_num <= max_pages and next_url:
         try:
             driver = safe_get(driver, next_url)
 
         except TimeoutException:
-            log.warning("⏱ Page-load timed-out in scrape_keyword, recycling driver")
+            log.warning("⏱ Page-load timed-out in scrape_url, recycling driver")
             _safe_quit(driver)
             driver = configure_driver()
             continue  # retry with new driver
 
         try:
             WebDriverWait(driver, 10).until(
-                EC.presence_of_element_located((By.XPATH, PAGE_READY_XPATH))
+                EC.presence_of_element_located((By.XPATH, PAGE_READY_XPATH_URL))
             )
         except Exception:
             break  # this page failed – return what we already have
 
         idx = 1
         while True:
-            xpath = XPATH_BASE.format(idx)
+            xpath = XPATH_BASE_URL.format(idx)
             try:
                 card = driver.find_element(By.XPATH, xpath)
             except Exception:
                 break
             parsed = parse_card_text(card.text.strip())
             parsed.update({
-                "keyword": keyword,
+                "url_source": url,
+                "url_identifier": url_identifier,
                 "page": page_num,
                 "rank": idx,
                 "links": extract_links(card),
@@ -617,6 +663,68 @@ def scrape_keyword(driver: webdriver.Chrome, keyword: str, max_pages: int) -> Li
             next_url = None
         page_num += 1
     return results
+
+
+def scrape_keyword(driver: webdriver.Chrome, keyword: str, max_pages: int) -> List[Dict]:
+    """Scrape *up to* ``max_pages`` for a keyword and return a list of parsed cards."""
+    results: List[Dict] = []
+    page_num = 1
+    next_url = build_url(keyword)
+
+    while page_num <= max_pages and next_url:
+        try:
+            driver = safe_get(driver, next_url)
+        except TimeoutException:
+            log.warning("⏱ Page-load timed-out in scrape_keyword, recycling driver")
+            _safe_quit(driver)
+            driver = configure_driver()
+            continue
+
+        try:
+            WebDriverWait(driver, 10).until(
+                EC.presence_of_element_located((By.XPATH, PAGE_READY_XPATH_KEYWORD))
+            )
+        except Exception:
+            break
+
+        idx = 1
+        while True:
+            xpath = XPATH_BASE_KEYWORD.format(idx)
+            try:
+                card = driver.find_element(By.XPATH, xpath)
+            except Exception:
+                break
+            parsed = parse_card_text(card.text.strip())
+            parsed.update({
+                "keyword": keyword,
+                "page": page_num,
+                "rank": idx,
+                "links": extract_links(card),
+            })
+            results.append(parsed)
+            idx += 1
+
+        if page_num >= max_pages:
+            break
+        try:
+            next_btn = driver.find_element(By.CSS_SELECTOR, "a.pagination__next")
+            next_url = next_btn.get_attribute("href")
+        except Exception:
+            next_url = None
+        page_num += 1
+    return results
+
+
+def scrape_search_input(driver: webdriver.Chrome, search_input: str, max_pages: int) -> List[Dict]:
+    """Universal function to scrape either keyword or complete URL"""
+    if is_complete_url(search_input):
+        # Extract identifier from URL for state tracking
+        url_identifier = f"URL_{hash(search_input) % 100000}"
+        log.info(f"🔗 Scraping complete URL: {search_input[:100]}...")
+        return scrape_url(driver, search_input, max_pages, url_identifier)
+    else:
+        log.info(f"🔍 Scraping keyword: {search_input}")
+        return scrape_keyword(driver, search_input, max_pages)
 
 ###############################################################################
 # ----- TELEGRAM --------------------------------------------------------------
@@ -642,7 +750,7 @@ def fmt_listing_for_telegram(lst: Dict) -> str:
         f"<b>Artikelzustand:</b> {cond}\n"
         f"<b>Bewertungen:</b> {fb}\n"
         f"<b>Veröffentlicht:</b> {ts}\n\n"
-        f"<a href=\"{link_html}\">Öffne Link</a>"
+        f"<a href=\"{link_html}\">Öffne Link</a>"
     )
 
 def send_telegram_message(html_text: str):
@@ -710,7 +818,7 @@ def save_state(state: Dict[str, str]):
         temp_path = STATE_PATH.with_name(f"state_temp_{os.getpid()}.json")
         with open(temp_path, 'w', encoding='utf-8') as f:
             json.dump(state, f, ensure_ascii=False, indent=2)
-        
+
         # Atomic rename (works on both Windows and Unix)
         if os.name == 'nt':  # Windows
             if STATE_PATH.exists():
@@ -731,7 +839,7 @@ def save_state(state: Dict[str, str]):
 def cleanup_on_exit():
     """Clean up resources when shutting down"""
     global running
-    
+
     # Clean up PID file
     if PID_FILE.exists():
         try:
@@ -739,7 +847,7 @@ def cleanup_on_exit():
             log.info("🧹 Cleaned up PID file")
         except Exception as e:
             log.warning(f"⚠️ Failed to remove PID file: {e}")
-    
+
     # Clean up state.json file
     if STATE_PATH.exists():
         try:
@@ -755,13 +863,13 @@ def check_system_resources():
         if mem.percent > 90:
             log.warning(f"⚠️ High memory usage: {mem.percent}%")
             return False
-        
+
         # Check available disk space
         disk = psutil.disk_usage('.')
         if disk.percent > 95:
             log.warning(f"⚠️ Low disk space: {disk.percent}% used")
             return False
-            
+
         return True
     except Exception as e:
         log.warning(f"⚠️ Resource monitoring failed: {str(e)}")
@@ -770,29 +878,29 @@ def check_system_resources():
 def main():
     import os
     from pathlib import Path
-    
+
     # Global flag for graceful shutdown
     global running
     running = True
-    
+
     def signal_handler(sig, frame):
         global running
         log.info("🛑 Shutdown signal received - stopping scraper gracefully...")
         running = False
         cleanup_on_exit()
         sys.exit(0)
-    
+
     # Register signal handlers for graceful shutdown
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
-    
+
     # Write PID file for process tracking
     pid_file = Path("scraper.pid")
     with open(pid_file, 'w') as f:
         f.write(str(os.getpid()))
-    
+
     log.info(f"🚀 eBay scraper started with PID {os.getpid()}")
-    
+
     state = load_state()  # keyword -> ISO timestamp str
     if not STATE_PATH.exists():
         STATE_PATH.write_text("{}", encoding="utf-8")
@@ -801,10 +909,10 @@ def main():
     try:
         cycle_count = 0
         driver = None
-        
+
         while running:  # Changed from 'while True' to respect shutdown signal
             cycle_count += 1
-            
+
             # Check system resources before starting cycle
             if not check_system_resources():
                 log.error("🚨 Critical resource shortage, cleaning up and restarting driver")
@@ -814,7 +922,7 @@ def main():
                 _kill_chrome_processes()
                 time.sleep(10)
                 continue
-            
+
             # Periodic driver restart to prevent memory leaks
             if cycle_count % 10 == 0 or driver is None:  # Every 10 cycles or first time
                 log.info(f"🔄 {'Periodic' if driver else 'Initial'} driver refresh (cycle #{cycle_count})")
@@ -822,43 +930,53 @@ def main():
                     _safe_quit(driver)
                 driver = configure_driver()
                 time.sleep(2)
-            
+
             # If no driver exists, create one
             if driver is None:
                 driver = configure_driver()
 
-            log.info(f"🔄 Starting scraping cycle #{cycle_count} for {len(KEYWORDS)} keywords")
-            
-            for kw in KEYWORDS:
-                # Check if we should stop before processing each keyword
+            # Combine keywords and URLs for processing
+            all_search_inputs = KEYWORDS + COMPLETE_URLS
+            log.info(f"🔄 Starting scraping cycle #{cycle_count} for {len(KEYWORDS)} keywords and {len(COMPLETE_URLS)} URLs")   
+
+            for search_input in all_search_inputs:
+                # Check if we should stop before processing each search input
                 if not running:
-                    log.info("🛑 Stop requested - exiting keyword loop")
+                    log.info("🛑 Stop requested - exiting search loop")
                     break
-                    
+
+                # Create identifier for state tracking
+                if is_complete_url(search_input):
+                    state_key = f"URL_{hash(search_input) % 100000}"
+                    log_identifier = f"URL: {search_input[:60]}..." if len(search_input) > 60 else f"URL: {search_input}"       
+                else:
+                    state_key = search_input
+                    log_identifier = f"keyword: '{search_input}'"
+
                 # -------------------------------------------------------------------
-                # keep trying NEW proxies until this keyword shows EUR/€
+                # keep trying NEW proxies until this search input shows EUR/€
                 # -------------------------------------------------------------------
                 validated = False
                 validation_attempts = 0
                 max_validation_attempts = 5
-                
+
                 while not validated and running and validation_attempts < max_validation_attempts:
                     validation_attempts += 1
-                    
+
                     if driver is None:  # first time or after failure
                         driver = configure_driver()
 
-                    log.info(f"🔍 Checking EUR currency for '{kw}' (attempt {validation_attempts})…")
+                    log.info(f"🔍 Checking EUR currency for {log_identifier} (attempt {validation_attempts})…")
                     try:
-                        if _ensure_eur_for_keyword(driver, kw):
-                            log.info(f"✅ '{kw}' confirmed EUR – scraping full {MAX_PAGES} page(s)")
+                        if _ensure_eur_for_search_input(driver, search_input):
+                            log.info(f"✅ {log_identifier} confirmed EUR – scraping full {MAX_PAGES} page(s)")
                             validated = True  # leave the while-retry loop
                         else:
-                            log.error(f"❌ Currency mismatch for '{kw}' – rotating proxy and retrying")
+                            log.error(f"❌ Currency mismatch for {log_identifier} – rotating proxy and retrying")
                             _safe_quit(driver)
                             driver = None  # trigger new proxy
                             time.sleep(2)  # Small delay before retry
-                            continue  # retry same keyword
+                            continue  # retry same search input
                     except Exception as e:
                         log.error(f"💥 Critical error during currency validation: {str(e)}")
                         log.error(traceback.format_exc())
@@ -867,9 +985,9 @@ def main():
                         time.sleep(5)
                         continue
 
-                # If validation failed after max attempts, skip this keyword
+                # If validation failed after max attempts, skip this search input
                 if not validated:
-                    log.error(f"❌ Skipping keyword '{kw}' after {max_validation_attempts} validation attempts")
+                    log.error(f"❌ Skipping {log_identifier} after {max_validation_attempts} validation attempts")
                     continue
 
                 # Check again before continuing with scraping
@@ -877,15 +995,15 @@ def main():
                     log.info("🛑 Stop requested - exiting before scraping")
                     break
 
-                last_iso = state.get(kw)
-                log.info(f"🔍 Checking keyword: '{kw}' (last seen: {last_iso or 'never'})")
+                last_iso = state.get(state_key)
+                log.info(f"🔍 Checking {log_identifier} (last seen: {last_iso or 'never'})")
                 first_run = last_iso is None
                 last_dt   = datetime.fromisoformat(last_iso) if last_iso else datetime(1970, 1, 1)
 
                 # ---- scrape --------------------------------------------------------
                 try:
-                    listings = scrape_keyword(driver, kw, MAX_PAGES)
-                    log.info(f"✅ Found {len(listings)} listings for '{kw}'")
+                    listings = scrape_search_input(driver, search_input, MAX_PAGES)
+                    log.info(f"✅ Found {len(listings)} listings for {log_identifier}")
                 except WebDriverException as exc:
                     log.error(f"🔥 WebDriver crashed during scraping: {exc}")
                     log.error(traceback.format_exc())
@@ -922,14 +1040,14 @@ def main():
 
                 # ---- update state --------------------------------------------------
                 if newest_seen > last_dt:
-                    state[kw] = newest_seen.isoformat()
+                    state[state_key] = newest_seen.isoformat()
                     save_state(state)
-                    log.info(f"📝 Updated last_seen for '{kw}' to {newest_seen.isoformat()}")
+                    log.info(f"📝 Updated last_seen for {log_identifier} to {newest_seen.isoformat()}")
 
                 # ---- send messages (if any) ----------------------------------------
                 if fresh and running:  # Only send if still running
-                    log.info(f"📧 Found {len(fresh)} new listings for '{kw}' - sending to Telegram...")
-                
+                    log.info(f"📧 Found {len(fresh)} new listings for {log_identifier} - sending to Telegram...")
+
                     for _dt, lst in sorted(fresh, key=lambda t: t[0]):
                         if not running:  # Check before each message
                             log.info("🛑 Stop requested - stopping message sending")
@@ -945,7 +1063,7 @@ def main():
             if not running:
                 log.info("🛑 Stop requested - exiting main loop")
                 break
-                
+
             # ----- wait before next poll -------------------------------------------
             log.info(f"✅ Completed cycle #{cycle_count}. Sleeping for {POLL_INTERVAL} seconds...")
             # Make sleep interruptible by checking running flag every second

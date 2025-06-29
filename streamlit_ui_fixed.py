@@ -11,6 +11,7 @@ import threading
 import subprocess
 import os
 import sys
+import re
 from datetime import datetime, timedelta
 from pathlib import Path
 import pandas as pd
@@ -336,6 +337,60 @@ def save_keywords(keywords):
     except Exception as e:
         return False, f"Error saving keywords: {str(e)}"
 
+
+def load_urls():
+    """Load complete URLs from the scraper file"""
+    try:
+        with open(SCRAPER_SCRIPT, 'r', encoding='utf-8') as f:
+            content = f.read()
+            
+        # Extract URLs from the COMPLETE_URLS list
+        import re
+        urls_match = re.search(r'COMPLETE_URLS:\s*List\[str\]\s*=\s*\[(.*?)\]', content, re.DOTALL)
+        if urls_match:
+            urls_str = urls_match.group(1)
+            urls = []
+            for line in urls_str.split(','):
+                line = line.strip().strip('"\'').strip()
+                if line and not line.startswith('#') and line != '' and line.startswith(('http://', 'https://')):
+                    urls.append(line)
+            return urls
+        
+        # Return empty list if parsing fails
+        return []
+    except Exception as e:
+        st.error(f"Error loading URLs: {str(e)}")
+        return []
+
+
+def save_urls(urls):
+    """Save complete URLs to the scraper file"""
+    try:
+        with open(SCRAPER_SCRIPT, 'r', encoding='utf-8') as f:
+            content = f.read()
+        
+        # Format URLs for Python list
+        if urls:
+            urls_formatted = ',\n    '.join([f'"{url}"' for url in urls])
+            urls_list = f'COMPLETE_URLS: List[str] = [\n    {urls_formatted},\n]'
+        else:
+            urls_list = 'COMPLETE_URLS: List[str] = [\n    # Example: "https://www.ebay.de/sch/i.html?_from=R40&_nkw=nintendo+switch&_sacat=139971&_sop=10&LH_BIN=1&rt=nc&LH_PrefLoc=3",\n    # Add your complete eBay search URLs here\n]'
+        
+        # Replace the COMPLETE_URLS list in the file
+        new_content = re.sub(
+            r'COMPLETE_URLS:\s*List\[str\]\s*=\s*\[.*?\]',
+            urls_list,
+            content,
+            flags=re.DOTALL
+        )
+        
+        with open(SCRAPER_SCRIPT, 'w', encoding='utf-8') as f:
+            f.write(new_content)
+        
+        return True, "URLs saved successfully!"
+    except Exception as e:
+        return False, f"Error saving URLs: {str(e)}"
+
 def load_state():
     """Load scraper state"""
     if STATE_PATH.exists():
@@ -350,10 +405,13 @@ def get_scraper_stats():
     """Get scraper statistics"""
     state = load_state()
     keywords = load_keywords()
+    urls = load_urls()
     
     stats = {
         'total_keywords': len(keywords),
-        'active_keywords': len(state),
+        'total_urls': len(urls),
+        'total_inputs': len(keywords) + len(urls),
+        'active_scans': len(state),
         'last_update': None,
         'total_scans': 0
     }
@@ -468,7 +526,7 @@ def main():
         st.header("📊 Quick Stats")
         stats = get_scraper_stats()
         st.metric("Total Keywords", stats['total_keywords'])
-        st.metric("Active Scans", stats['active_keywords'])
+        st.metric("Active Scans", stats['active_scans'])
         if stats['last_update']:
             time_ago = datetime.now() - stats['last_update']
             hours_ago = int(time_ago.total_seconds() / 3600)
@@ -476,77 +534,80 @@ def main():
         st.markdown('</div>', unsafe_allow_html=True)
     
     # Main content area
-    tab1, tab2, tab3, tab4 = st.tabs(["📝 Keywords", "📊 Dashboard", "⚙️ Settings", "📋 Logs"])
+    tab1, tab2, tab3, tab4 = st.tabs(["📝 Search Inputs", "📊 Dashboard", "⚙️ Settings", "📋 Logs"])
     
     with tab1:
-        st.header("🔍 Keyword Management")
+        st.header("🔍 Search Input Management")
         
-        # Current keywords
-        keywords = load_keywords()
+        # Create sub-tabs for keywords and URLs
+        sub_tab1, sub_tab2 = st.tabs(["🔤 Keywords", "🔗 Complete URLs"])
         
-        # Debug info
-        st.write(f"Debug: Found {len(keywords)} keywords")
-        
-        col1, col2 = st.columns([2, 1])
-        
-        with col1:
-            st.subheader("Current Keywords")
-            if keywords:
-                for i, keyword in enumerate(keywords):
-                    col_kw, col_del = st.columns([4, 1])
-                    with col_kw:
-                        st.markdown(f"""
-                            <div style="
-                                background-color: #f8fafc; 
-                                border: 1px solid #e2e8f0; 
-                                border-radius: 8px; 
-                                padding: 1rem; 
-                                margin: 0.5rem 0;
-                                display: flex;
-                                align-items: center;
-                                color: #1e293b;  /* 👈 Dark blue-gray text */
-                            ">
-                                🔍 <strong>{keyword}</strong>
-                            </div>
-                            """, unsafe_allow_html=True)
-                    with col_del:
-                        if st.button("🗑️", key=f"del_{i}", help="Delete keyword", type="secondary"):
-                            keywords.remove(keyword)
+        with sub_tab1:
+            st.subheader("Keyword Search Management")
+            
+            # Current keywords
+            keywords = load_keywords()
+            
+            col1, col2 = st.columns([2, 1])
+            
+            with col1:
+                st.subheader("Current Keywords")
+                if keywords:
+                    for i, keyword in enumerate(keywords):
+                        col_kw, col_del = st.columns([4, 1])
+                        with col_kw:
+                            st.markdown(f"""
+                                <div style="
+                                    background-color: #f8fafc; 
+                                    border: 1px solid #e2e8f0; 
+                                    border-radius: 8px; 
+                                    padding: 1rem; 
+                                    margin: 0.5rem 0;
+                                    display: flex;
+                                    align-items: center;
+                                    color: #1e293b;
+                                ">
+                                    🔍 <strong>{keyword}</strong>
+                                </div>
+                                """, unsafe_allow_html=True)
+                        with col_del:
+                            if st.button("🗑️", key=f"del_kw_{i}", help="Delete keyword", type="secondary"):
+                                keywords.remove(keyword)
+                                success, message = save_keywords(keywords)
+                                if success:
+                                    st.success(message)
+                                    st.rerun()
+                                else:
+                                    st.error(message)
+                else:
+                    st.info("No keywords configured. Add some keywords to start monitoring.")
+            
+            with col2:
+                st.subheader("➕ Add New Keyword")
+                
+                # Direct input method
+                st.write("**Method 1: Quick Add**")
+                new_keyword = st.text_input(
+                    "Enter keyword:", 
+                    placeholder="e.g., iPhone 15 Pro",
+                    key="quick_keyword_input"
+                )
+                
+                if st.button("➕ Add Keyword", type="primary", key="add_quick"):
+                    if new_keyword and new_keyword.strip():
+                        new_keyword = new_keyword.strip()
+                        if new_keyword not in keywords:
+                            keywords.append(new_keyword)
                             success, message = save_keywords(keywords)
                             if success:
-                                st.success(message)
+                                st.success(f"✅ Added keyword: **{new_keyword}**")
                                 st.rerun()
                             else:
                                 st.error(message)
-            else:
-                st.info("No keywords configured. Add some keywords to start monitoring.")
-        
-        with col2:
-            st.subheader("➕ Add New Keyword")
-            
-            # Direct input method
-            st.write("**Method 1: Quick Add**")
-            new_keyword = st.text_input(
-                "Enter keyword:", 
-                placeholder="e.g., iPhone 15 Pro",
-                key="quick_keyword_input"
-            )
-            
-            if st.button("➕ Add Keyword", type="primary", key="add_quick"):
-                if new_keyword and new_keyword.strip():
-                    new_keyword = new_keyword.strip()
-                    if new_keyword not in keywords:
-                        keywords.append(new_keyword)
-                        success, message = save_keywords(keywords)
-                        if success:
-                            st.success(f"✅ Added keyword: **{new_keyword}**")
-                            st.rerun()
                         else:
-                            st.error(message)
+                            st.warning("⚠️ Keyword already exists!")
                     else:
-                        st.warning("⚠️ Keyword already exists!")
-                else:
-                    st.error("Please enter a keyword!")
+                        st.error("Please enter a keyword!")
             
             st.divider()
             
@@ -612,17 +673,142 @@ def main():
                 else:
                     st.error("Please enter keywords to add!")
         
-        # Show current keyword count
+        with sub_tab2:
+            st.subheader("Complete URL Management")
+            
+            # Current URLs
+            urls = load_urls()
+            
+            col1, col2 = st.columns([2, 1])
+            
+            with col1:
+                st.subheader("Current URLs")
+                if urls:
+                    for i, url in enumerate(urls):
+                        col_url, col_del = st.columns([4, 1])
+                        with col_url:
+                            # Truncate long URLs for display
+                            display_url = url[:80] + "..." if len(url) > 80 else url
+                            st.markdown(f"""
+                                <div style="
+                                    background-color: #eff6ff; 
+                                    border: 1px solid #dbeafe; 
+                                    border-radius: 8px; 
+                                    padding: 1rem; 
+                                    margin: 0.5rem 0;
+                                    color: #1e40af;
+                                ">
+                                    🔗 <strong>{display_url}</strong>
+                                    <br><small style="color: #64748b;">Full URL: {url}</small>
+                                </div>
+                                """, unsafe_allow_html=True)
+                        with col_del:
+                            if st.button("🗑️", key=f"del_url_{i}", help="Delete URL", type="secondary"):
+                                urls.remove(url)
+                                success, message = save_urls(urls)
+                                if success:
+                                    st.success(message)
+                                    st.rerun()
+                                else:
+                                    st.error(message)
+                else:
+                    st.info("No complete URLs configured. Add eBay search URLs to monitor specific searches.")
+            
+            with col2:
+                st.subheader("🔗 Add New URL")
+                
+                # Help text
+                st.info("""
+                **How to get eBay search URLs:**
+                1. Go to eBay and perform your search
+                2. Apply any filters (price, condition, etc.)
+                3. Copy the complete URL from your browser
+                4. Paste it here
+                """)
+                
+                # Direct input method
+                st.write("**Add Complete eBay URL**")
+                new_url = st.text_area(
+                    "Enter complete eBay search URL:", 
+                    placeholder="https://www.ebay.de/sch/i.html?_from=R40&_nkw=...",
+                    height=100,
+                    key="url_input"
+                )
+                
+                if st.button("🔗 Add URL", type="primary", key="add_url"):
+                    if new_url and new_url.strip():
+                        new_url = new_url.strip()
+                        if new_url.startswith(('http://', 'https://')) and 'ebay' in new_url.lower():
+                            if new_url not in urls:
+                                urls.append(new_url)
+                                success, message = save_urls(urls)
+                                if success:
+                                    st.success(f"✅ Added URL successfully!")
+                                    st.rerun()
+                                else:
+                                    st.error(message)
+                            else:
+                                st.warning("⚠️ URL already exists!")
+                        else:
+                            st.error("❌ Please enter a valid eBay URL (must start with http:// or https:// and contain 'ebay')")
+                    else:
+                        st.error("Please enter a URL!")
+                
+                st.divider()
+                
+                # Bulk add section
+                st.write("**Bulk Add URLs**")
+                bulk_urls = st.text_area(
+                    "Multiple URLs (one per line):",
+                    placeholder="https://www.ebay.de/sch/...\nhttps://www.ebay.de/sch/...",
+                    height=100,
+                    help="Enter multiple eBay URLs, one per line"
+                )
+                
+                if st.button("📦 Add All URLs", type="secondary", key="bulk_add_urls"):
+                    if bulk_urls.strip():
+                        new_urls = [url.strip() for url in bulk_urls.strip().split('\n') if url.strip()]
+                        added_count = 0
+                        invalid_count = 0
+                        
+                        for url in new_urls:
+                            if url.startswith(('http://', 'https://')) and 'ebay' in url.lower():
+                                if url not in urls:
+                                    urls.append(url)
+                                    added_count += 1
+                            else:
+                                invalid_count += 1
+                        
+                        if added_count > 0:
+                            success, message = save_urls(urls)
+                            if success:
+                                msg = f"✅ Added {added_count} URLs!"
+                                if invalid_count > 0:
+                                    msg += f" ({invalid_count} invalid URLs skipped)"
+                                st.success(msg)
+                                st.rerun()
+                            else:
+                                st.error(message)
+                        elif invalid_count > 0:
+                            st.error(f"❌ {invalid_count} invalid URLs found. URLs must start with http:// or https:// and contain 'ebay'")
+                        else:
+                            st.info("No new URLs to add (all already exist)")
+                    else:
+                        st.error("Please enter URLs to add!")
+        
+        # Show current statistics for both keywords and URLs
         st.divider()
-        col_stats1, col_stats2, col_stats3 = st.columns(3)
+        col_stats1, col_stats2, col_stats3, col_stats4 = st.columns(4)
         with col_stats1:
             st.metric("Total Keywords", len(keywords))
         with col_stats2:
+            st.metric("Total URLs", len(urls))
+        with col_stats3:
             state = load_state()
             st.metric("Active Scans", len(state))
-        with col_stats3:
-            if keywords:
-                st.metric("Newest Keyword", keywords[-1] if keywords else "None")
+        with col_stats4:
+            total_inputs = len(keywords) + len(urls)
+            st.metric("Total Monitored", total_inputs)
     
     with tab2:
         st.header("📊 Scraper Dashboard")
@@ -659,8 +845,8 @@ def main():
         with col3:
             st.markdown(f"""
             <div style="background: linear-gradient(135deg, #8b5cf6, #5b21b6); padding: 1rem; border-radius: 10px; color: white; text-align: center;">
-                <h3>{stats['active_keywords']}</h3>
-                <p>Active Scans</p>
+                <h3>{stats['total_urls']}</h3>
+                <p>URLs Monitored</p>
             </div>
             """, unsafe_allow_html=True)
         
@@ -680,14 +866,15 @@ def main():
         
         st.divider()
         
-        # Current Keywords Display
-        st.subheader("🔍 Current Keywords")
-        keywords = load_keywords()
-        if keywords:
-            # Display keywords in a nice grid
-            cols = st.columns(3)
-            for i, keyword in enumerate(keywords):
-                with cols[i % 3]:
+        # Current Search Inputs Display
+        col_search1, col_search2 = st.columns(2)
+        
+        with col_search1:
+            st.subheader("🔍 Current Keywords")
+            keywords = load_keywords()
+            if keywords:
+                # Display keywords in a nice grid
+                for keyword in keywords:
                     st.markdown(f"""
                     <div style="
                         background-color: #f0f9ff; 
@@ -702,8 +889,40 @@ def main():
                         🔍 {keyword}
                     </div>
                     """, unsafe_allow_html=True)
+            else:
+                st.warning("⚠️ No keywords configured!")
+        
+        with col_search2:
+            st.subheader("🔗 Current URLs")
+            urls = load_urls()
+            if urls:
+                # Display URLs in a nice format
+                for url in urls:
+                    display_url = url[:50] + "..." if len(url) > 50 else url
+                    st.markdown(f"""
+                    <div style="
+                        background-color: #eff6ff; 
+                        border: 2px solid #3b82f6; 
+                        border-radius: 8px; 
+                        padding: 0.8rem; 
+                        margin: 0.3rem 0;
+                        font-weight: bold;
+                        color: #1e40af;
+                    ">
+                        🔗 {display_url}
+                        <br><small style="color: #64748b;">Full: {url}</small>
+                    </div>
+                    """, unsafe_allow_html=True)
+            else:
+                st.warning("⚠️ No URLs configured!")
+        
+        # Overall status
+        st.divider()
+        total_inputs = len(keywords) + len(urls)
+        if total_inputs == 0:
+            st.error("❌ No search inputs configured! Please add keywords or URLs in the Search Input Management tab.")
         else:
-            st.warning("⚠️ No keywords configured! Go to the Keywords tab to add some search terms.")
+            st.success(f"✅ Monitoring {len(keywords)} keywords and {len(urls)} URLs ({total_inputs} total search inputs)")
         
         st.divider()
         

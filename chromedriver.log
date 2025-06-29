@@ -1,0 +1,106 @@
+[1751129027.650][INFO]: Starting ChromeDriver 138.0.7204.49 (d2b48fd5f7813ed477a2d68fa232b8178fa4fb1e-refs/branch-heads/7204@{#1814}) on port 51087
+[1751129027.650][INFO]: Please see https://chromedriver.chromium.org/security-considerations for suggestions on keeping ChromeDriver safe.
+[1751129027.666][INFO]: ChromeDriver was started successfully on port 51087
+[1751129028.151][INFO]: [0a924985ca89a82df93cf1a57bf5b752] COMMAND InitSession {
+   "capabilities": {
+      "alwaysMatch": {
+         "browserName": "chrome",
+         "goog:chromeOptions": {
+            "args": [ "--disable-gpu", "--no-sandbox", "--disable-dev-shm-usage", "--disable-features=NetworkService", "--window-size=1200,800", "--proxy-server=http://250621Ev04e-resi_region-US_California:5PjDM1IoS0JSr2c@ca.proxy-jet.io:1010", "--user-data-dir=C:\\Users\\MULTI8~1\\AppData\\Local\\Temp\\chrome-profile-ese00gd6", "--disable-extensions", "--disable-browser-side-navigation", "--disable-gpu-sandbox", "--no-zygote", "--single-process", "--disk-cache-size=0", "--disable-infobars", "--disable-breakpad", "--disable-background-timer-throttling", "--disable-backgrounding-occluded-windows", "--disable-renderer-backgrounding" ],
+            "extensions": [  ]
+         },
+         "pageLoadStrategy": "normal"
+      },
+      "firstMatch": [ {
+      } ]
+   }
+}
+[1751129028.152][INFO]: Browser search. Trying... C:\Users\MULTI 88 G\.wdm\drivers\chromedriver\win64\138.0.7204.49\chrome.exe
+[1751129028.152][INFO]: Browser search. Trying... C:\Users\MULTI 88 G\.wdm\drivers\chromedriver\win64\138.0.7204.49\chrome.exe
+[1751129028.152][INFO]: Browser search. Trying... C:\Users\MULTI 88 G\.wdm\drivers\chromedriver\win64\138.0.7204.49\chromium.exe
+[1751129028.153][INFO]: Browser search. Trying... C:\Users\MULTI 88 G\AppData\Local\Google\Chrome\Application\chrome.exe
+[1751129028.153][INFO]: Browser search. Trying... C:\Program Files (x86)\Google\Chrome\Application\chrome.exe
+[1751129028.153][INFO]: Browser search. Found at  C:\Program Files (x86)\Google\Chrome\Application\chrome.exe
+[1751129028.154][INFO]: Populating Preferences file: {
+   "alternate_error_pages": {
+      "enabled": false
+   },
+   "autofill": {
+      "enabled": false
+   },
+   "browser": {
+      "check_default_browser": false
+   },
+   "distribution": {
+      "import_bookmarks": false,
+      "import_history": false,
+      "import_search_engine": false,
+      "make_chrome_default_for_user": false,
+      "skip_first_run_ui": true
+   },
+   "dns_prefetching": {
+      "enabled": false
+   },
+   "profile": {
+      "content_settings": {
+         "pattern_pairs": {
+            "https://*,*": {
+               "media-stream": {
+                  "audio": "Default",
+                  "video": "Default"
+               }
+            }
+         }
+      },
+      "default_content_setting_values": {
+         "geolocation": 1
+      },
+      "default_content_settings": {
+         "geolocation": 1,
+         "mouselock": 1,
+         "notifications": 1,
+         "popups": 1,
+         "ppapi-broker": 1
+      },
+      "password_manager_enabled": false
+   },
+   "safebrowsing": {
+      "enabled": false
+   },
+   "search": {
+      "suggest_enabled": false
+   },
+   "translate": {
+      "enabled": false
+   }
+}
+[1751129028.154][INFO]: Populating Local State file: {
+   "background_mode": {
+      "enabled": false
+   },
+   "ssl": {
+      "rev_checking": {
+         "enabled": false
+      }
+   }
+}
+[1751129028.155][INFO]: ChromeDriver supports communication with Chrome via pipes. This is more reliable and more secure.
+[1751129028.155][INFO]: Use the --remote-debugging-pipe Chrome switch instead of the default --remote-debugging-port to enable this communication mode.
+[1751129028.156][INFO]: Launching chrome: "C:\Program Files (x86)\Google\Chrome\Application\chrome.exe" --allow-pre-commit-input --disable-background-networking --disable-background-timer-throttling --disable-backgrounding-occluded-windows --disable-breakpad --disable-browser-side-navigation --disable-client-side-phishing-detection --disable-default-apps --disable-dev-shm-usage --disable-extensions --disable-features=NetworkService --disable-gpu --disable-gpu-sandbox --disable-hang-monitor --disable-infobars --disable-popup-blocking --disable-prompt-on-repost --disable-renderer-backgrounding --disable-sync --disk-cache-size=0 --enable-automation --enable-logging --log-level=0 --no-first-run --no-sandbox --no-service-autorun --no-zygote --password-store=basic --proxy-server=http://250621Ev04e-resi_region-US_California:5PjDM1IoS0JSr2c@ca.proxy-jet.io:1010 --remote-debugging-port=0 --single-process --test-type=webdriver --use-mock-keychain --user-data-dir="C:\Users\MULTI8~1\AppData\Local\Temp\chrome-profile-ese00gd6" --window-size=1200,800
+[1751129028.555][DEBUG]: DevTools HTTP Request: http://localhost:51097/json/version
+[1751129029.401][DEBUG]: DevTools HTTP Response: {
+   "Browser": "Chrome/138.0.7204.50",
+   "Protocol-Version": "1.3",
+   "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36",
+   "V8-Version": "13.8.258.19",
+   "WebKit-Version": "537.36 (@0d4712a3edf9bf23eeeef02d799ac84541244fd2)",
+   "webSocketDebuggerUrl": "ws://localhost:51097/devtools/browser/44c025de-8df0-4c1d-ba43-1eeda31b01a7"
+}
+
+[1751129029.401][DEBUG]: DevTools HTTP Request: http://localhost:51097/json/list
+[1751129031.793][DEBUG]: DevTools HTTP Request failed
+[1751129031.856][INFO]: [0a924985ca89a82df93cf1a57bf5b752] RESPONSE InitSession ERROR session not created: Chrome failed to start: crashed.
+  (chrome not reachable)
+  (The process started from chrome location C:\Program Files (x86)\Google\Chrome\Application\chrome.exe is no longer running, so ChromeDriver is assuming that Chrome has crashed.)
+[1751129031.856][DEBUG]: Log type 'driver' lost 0 entries on destruction
+[1751129031.856][DEBUG]: Log type 'browser' lost 0 entries on destruction
